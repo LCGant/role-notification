@@ -1,0 +1,255 @@
+package delivery
+
+import (
+	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
+
+	"github.com/LCGant/role-notification/internal/sender"
+)
+
+type Kind string
+
+const (
+	KindVerification  Kind = "verification"
+	KindPasswordReset Kind = "password_reset"
+)
+
+type Job struct {
+	Kind          Kind      `json:"kind"`
+	To            string    `json:"to"`
+	Token         string    `json:"token"`
+	CreatedAt     time.Time `json:"created_at"`
+	Attempts      int       `json:"attempts,omitempty"`
+	NextAttemptAt time.Time `json:"next_attempt_at,omitempty"`
+}
+
+type Service struct {
+	queueDir string
+	queueKey []byte
+	sender   sender.Sender
+	logger   *slog.Logger
+}
+
+type envelope struct {
+	Nonce      string `json:"nonce"`
+	Ciphertext string `json:"ciphertext"`
+}
+
+func New(queueDir string, queueKey []byte, backend sender.Sender, logger *slog.Logger) *Service {
+	return &Service{
+		queueDir: queueDir,
+		queueKey: append([]byte(nil), queueKey...),
+		sender:   backend,
+		logger:   logger,
+	}
+}
+
+func (s *Service) EnqueueVerification(ctx context.Context, to, token string) error {
+	return s.enqueue(ctx, Job{
+		Kind:      KindVerification,
+		To:        strings.TrimSpace(to),
+		Token:     strings.TrimSpace(token),
+		CreatedAt: time.Now().UTC(),
+	})
+}
+
+func (s *Service) EnqueuePasswordReset(ctx context.Context, to, token string) error {
+	return s.enqueue(ctx, Job{
+		Kind:      KindPasswordReset,
+		To:        strings.TrimSpace(to),
+		Token:     strings.TrimSpace(token),
+		CreatedAt: time.Now().UTC(),
+	})
+}
+
+func (s *Service) enqueue(ctx context.Context, job Job) error {
+	_ = ctx
+	if err := os.MkdirAll(s.queueDir, 0o700); err != nil {
+		return err
+	}
+	payload, err := s.encryptJob(job)
+	if err != nil {
+		return err
+	}
+	name := fmt.Sprintf("%d-%s.json", time.Now().UTC().UnixNano(), job.Kind)
+	return os.WriteFile(filepath.Join(s.queueDir, name), payload, 0o600)
+}
+
+func (s *Service) Run(ctx context.Context) {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	s.processPending(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.processPending(ctx)
+		}
+	}
+}
+
+func (s *Service) processPending(ctx context.Context) {
+	if err := os.MkdirAll(s.queueDir, 0o700); err != nil {
+		if s.logger != nil {
+			s.logger.Error("notification queue init failed", "err", err)
+		}
+		return
+	}
+	entries, err := os.ReadDir(s.queueDir)
+	if err != nil {
+		if s.logger != nil {
+			s.logger.Error("notification queue read failed", "err", err)
+		}
+		return
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(s.queueDir, entry.Name())
+		payload, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		var job Job
+		if err := s.decryptJob(payload, &job); err != nil {
+			_ = os.Remove(path)
+			continue
+		}
+		if !job.NextAttemptAt.IsZero() && job.NextAttemptAt.After(time.Now().UTC()) {
+			continue
+		}
+		if err := s.dispatch(ctx, job); err != nil {
+			if s.logger != nil {
+				s.logger.Warn("notification dispatch failed", "kind", job.Kind, "to", job.To, "attempts", job.Attempts+1, "err", err)
+			}
+			if requeueErr := s.requeue(path, job); requeueErr != nil && s.logger != nil {
+				s.logger.Error("notification requeue failed", "kind", job.Kind, "to", job.To, "err", requeueErr)
+			}
+			continue
+		}
+		_ = os.Remove(path)
+	}
+}
+
+func (s *Service) dispatch(ctx context.Context, job Job) error {
+	switch job.Kind {
+	case KindVerification:
+		return s.sender.SendVerification(ctx, job.To, job.Token)
+	case KindPasswordReset:
+		return s.sender.SendPasswordReset(ctx, job.To, job.Token)
+	default:
+		return fmt.Errorf("unsupported notification kind %q", job.Kind)
+	}
+}
+
+func (s *Service) requeue(path string, job Job) error {
+	job.Attempts++
+	if job.Attempts >= 5 {
+		return s.deadLetter(path)
+	}
+	job.NextAttemptAt = time.Now().UTC().Add(backoffForAttempt(job.Attempts))
+	payload, err := s.encryptJob(job)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(path, payload, 0o600); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) deadLetter(path string) error {
+	deadDir := filepath.Join(s.queueDir, "dead-letter")
+	if err := os.MkdirAll(deadDir, 0o700); err != nil {
+		return err
+	}
+	return os.Rename(path, filepath.Join(deadDir, filepath.Base(path)))
+}
+
+func (s *Service) encryptJob(job Job) ([]byte, error) {
+	plain, err := json.Marshal(job)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(s.queueKey)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	sealed := gcm.Seal(nil, nonce, plain, nil)
+	return json.Marshal(envelope{
+		Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		Ciphertext: base64.StdEncoding.EncodeToString(sealed),
+	})
+}
+
+func (s *Service) decryptJob(payload []byte, job *Job) error {
+	var env envelope
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return err
+	}
+	nonce, err := base64.StdEncoding.DecodeString(env.Nonce)
+	if err != nil {
+		return err
+	}
+	ciphertext, err := base64.StdEncoding.DecodeString(env.Ciphertext)
+	if err != nil {
+		return err
+	}
+	block, err := aes.NewCipher(s.queueKey)
+	if err != nil {
+		return err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return err
+	}
+	plain, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(plain, job)
+}
+
+func backoffForAttempt(attempt int) time.Duration {
+	if attempt <= 0 {
+		return time.Second
+	}
+	backoff := time.Second << min(attempt-1, 5)
+	if backoff > time.Minute {
+		return time.Minute
+	}
+	return backoff
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
