@@ -109,6 +109,12 @@ func (s *Service) processPending(ctx context.Context) {
 		}
 		return
 	}
+	if err := os.MkdirAll(s.processingDir(), 0o700); err != nil {
+		if s.logger != nil {
+			s.logger.Error("notification processing queue init failed", "err", err)
+		}
+		return
+	}
 	entries, err := os.ReadDir(s.queueDir)
 	if err != nil {
 		if s.logger != nil {
@@ -124,28 +130,34 @@ func (s *Service) processPending(ctx context.Context) {
 			continue
 		}
 		path := filepath.Join(s.queueDir, entry.Name())
-		payload, err := os.ReadFile(path)
+		claimedPath, err := s.claim(path)
 		if err != nil {
+			continue
+		}
+		payload, err := os.ReadFile(claimedPath)
+		if err != nil {
+			_ = os.Remove(claimedPath)
 			continue
 		}
 		var job Job
 		if err := s.decryptJob(payload, &job); err != nil {
-			_ = os.Remove(path)
+			_ = os.Remove(claimedPath)
 			continue
 		}
 		if !job.NextAttemptAt.IsZero() && job.NextAttemptAt.After(time.Now().UTC()) {
+			_ = s.release(claimedPath)
 			continue
 		}
 		if err := s.dispatch(ctx, job); err != nil {
 			if s.logger != nil {
 				s.logger.Warn("notification dispatch failed", "kind", job.Kind, "to", job.To, "attempts", job.Attempts+1, "err", err)
 			}
-			if requeueErr := s.requeue(path, job); requeueErr != nil && s.logger != nil {
+			if requeueErr := s.requeue(claimedPath, job); requeueErr != nil && s.logger != nil {
 				s.logger.Error("notification requeue failed", "kind", job.Kind, "to", job.To, "err", requeueErr)
 			}
 			continue
 		}
-		_ = os.Remove(path)
+		_ = os.Remove(claimedPath)
 	}
 }
 
@@ -173,7 +185,7 @@ func (s *Service) requeue(path string, job Job) error {
 	if err := os.WriteFile(path, payload, 0o600); err != nil {
 		return err
 	}
-	return nil
+	return s.release(path)
 }
 
 func (s *Service) deadLetter(path string) error {
@@ -182,6 +194,22 @@ func (s *Service) deadLetter(path string) error {
 		return err
 	}
 	return os.Rename(path, filepath.Join(deadDir, filepath.Base(path)))
+}
+
+func (s *Service) processingDir() string {
+	return filepath.Join(s.queueDir, "processing")
+}
+
+func (s *Service) claim(path string) (string, error) {
+	claimedPath := filepath.Join(s.processingDir(), filepath.Base(path))
+	if err := os.Rename(path, claimedPath); err != nil {
+		return "", err
+	}
+	return claimedPath, nil
+}
+
+func (s *Service) release(path string) error {
+	return os.Rename(path, filepath.Join(s.queueDir, filepath.Base(path)))
 }
 
 func (s *Service) encryptJob(job Job) ([]byte, error) {
