@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	stdmail "net/mail"
 	"net/smtp"
 	"os"
 	"path/filepath"
@@ -46,6 +47,10 @@ func (s *smtpSender) SendSocial(ctx context.Context, to, subject, body string) e
 }
 
 func (s *smtpSender) send(ctx context.Context, to, subject, body string) error {
+	fromAddress, toAddress, subject, err := normalizeMessageParts(s.cfg.SMTPFrom, to, subject)
+	if err != nil {
+		return err
+	}
 	addr := net.JoinHostPort(s.cfg.SMTPHost, strconv.Itoa(s.cfg.SMTPPort))
 	dialer := &net.Dialer{Timeout: 10 * time.Second}
 	conn, err := dialer.DialContext(ctx, "tcp", addr)
@@ -82,11 +87,14 @@ func (s *smtpSender) send(ctx context.Context, to, subject, body string) error {
 		}
 	}
 
-	msg := buildMessage(s.cfg.SMTPFrom, to, subject, body)
-	if err := client.Mail(s.cfg.SMTPFrom); err != nil {
+	msg, err := buildMessage(fromAddress, toAddress, subject, body)
+	if err != nil {
 		return err
 	}
-	if err := client.Rcpt(to); err != nil {
+	if err := client.Mail(fromAddress); err != nil {
+		return err
+	}
+	if err := client.Rcpt(toAddress); err != nil {
 		return err
 	}
 	wc, err := client.Data()
@@ -116,7 +124,11 @@ func (o *outboxSender) SendPasswordReset(ctx context.Context, to, token string) 
 }
 
 func (o *outboxSender) SendSocial(ctx context.Context, to, subject, body string) error {
-	return o.write(ctx, "social", to, buildMessage(o.cfg.SMTPFrom, to, strings.TrimSpace(subject), strings.TrimSpace(body)))
+	message, err := buildMessage(o.cfg.SMTPFrom, to, strings.TrimSpace(subject), strings.TrimSpace(body))
+	if err != nil {
+		return err
+	}
+	return o.write(ctx, "social", to, message)
 }
 
 func (o *outboxSender) write(ctx context.Context, prefix, to, body string) error {
@@ -129,7 +141,11 @@ func (o *outboxSender) write(ctx context.Context, prefix, to, body string) error
 	return os.WriteFile(path, []byte(body), 0o600)
 }
 
-func buildMessage(from, to, subject, body string) string {
+func buildMessage(from, to, subject, body string) (string, error) {
+	from, to, subject, err := normalizeMessageParts(from, to, subject)
+	if err != nil {
+		return "", err
+	}
 	var b strings.Builder
 	b.WriteString("From: ")
 	b.WriteString(from)
@@ -144,7 +160,38 @@ func buildMessage(from, to, subject, body string) string {
 	b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n")
 	b.WriteString("\r\n")
 	b.WriteString(body)
-	return b.String()
+	return b.String(), nil
+}
+
+func normalizeMessageParts(from, to, subject string) (string, string, string, error) {
+	if strings.TrimSpace(from) == "" {
+		from = "noreply@local.invalid"
+	}
+	fromAddress, err := normalizeAddress(from)
+	if err != nil {
+		return "", "", "", err
+	}
+	toAddress, err := normalizeAddress(to)
+	if err != nil {
+		return "", "", "", err
+	}
+	subject = strings.TrimSpace(subject)
+	if subject == "" || strings.ContainsAny(subject, "\r\n") {
+		return "", "", "", errors.New("invalid subject")
+	}
+	return fromAddress, toAddress, subject, nil
+}
+
+func normalizeAddress(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || strings.ContainsAny(value, "\r\n") {
+		return "", errors.New("invalid address")
+	}
+	addr, err := stdmail.ParseAddress(value)
+	if err != nil || strings.TrimSpace(addr.Address) == "" {
+		return "", errors.New("invalid address")
+	}
+	return strings.TrimSpace(addr.Address), nil
 }
 
 func verificationBody(cfg config.MailConfig, token string) string {

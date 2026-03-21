@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/LCGant/role-notification/internal/authclient"
 	"github.com/LCGant/role-notification/internal/config"
 	"github.com/LCGant/role-notification/internal/delivery"
 	"github.com/LCGant/role-notification/internal/sender"
@@ -21,7 +22,7 @@ import (
 )
 
 func TestInternalVerificationRequiresToken(t *testing.T) {
-	cfg := config.Config{InternalToken: "secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{1}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
+	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", SocialInternalToken: "social-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{1}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New())
 
@@ -36,7 +37,7 @@ func TestInternalVerificationRequiresToken(t *testing.T) {
 
 func TestVerificationWritesOutbox(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.Config{InternalToken: "secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{2}, 32), Mail: config.MailConfig{OutboxDir: dir}}
+	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", SocialInternalToken: "social-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{2}, 32), Mail: config.MailConfig{OutboxDir: dir}}
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -45,7 +46,7 @@ func TestVerificationWritesOutbox(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/internal/email-verification", bytes.NewBufferString(`{"to":"u@example.com","token":"abc"}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", "secret")
+	req.Header.Set("X-Internal-Token", "verify-secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusAccepted {
@@ -55,13 +56,13 @@ func TestVerificationWritesOutbox(t *testing.T) {
 }
 
 func TestInternalVerificationRejectsTrailingJSONData(t *testing.T) {
-	cfg := config.Config{InternalToken: "secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{3}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
+	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", SocialInternalToken: "social-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{3}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	h := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New())
 
 	req := httptest.NewRequest("POST", "/internal/email-verification", bytes.NewBufferString("{\"to\":\"u@example.com\",\"token\":\"abc\"}junk"))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", "secret")
+	req.Header.Set("X-Internal-Token", "verify-secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
@@ -71,16 +72,27 @@ func TestInternalVerificationRejectsTrailingJSONData(t *testing.T) {
 
 func TestSocialNotificationWritesOutbox(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.Config{InternalToken: "secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{4}, 32), Mail: config.MailConfig{OutboxDir: dir}}
+	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", SocialInternalToken: "social-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{4}, 32), Mail: config.MailConfig{OutboxDir: dir}}
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go queue.Run(ctx)
-	h := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New())
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Internal-Token") != "lookup-secret" {
+			t.Fatalf("unexpected auth lookup token")
+		}
+		if r.Header.Get("X-Tenant-Id") != "default" {
+			t.Fatalf("unexpected tenant header")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"user":{"id":42,"tenant_id":"default","email":"u@example.com"}}`))
+	}))
+	defer authSrv.Close()
+	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New(), nil, authclient.New(authSrv.URL, "lookup-secret"))
 
-	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","to":"u@example.com","kind":"follow","subject":"New follower","body":"Alice started following you."}`))
+	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"New follower","body":"Alice started following you."}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", "secret")
+	req.Header.Set("X-Internal-Token", "social-secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusAccepted {
@@ -99,7 +111,7 @@ func (s stubAuthn) Required(context.Context, *http.Request) (viewer, error) {
 }
 
 func TestNotificationInboxEndpoints(t *testing.T) {
-	cfg := config.Config{InternalToken: "secret", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{5}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
+	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", SocialInternalToken: "social-secret", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{5}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	inbox := memory.New()
 	authn := stubAuthn{viewer: viewer{UserID: 99, TenantID: "default"}}

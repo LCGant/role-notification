@@ -29,12 +29,12 @@ type sessionAuthenticator struct {
 }
 
 func newAuthenticator(cfg config.Config) (Authenticator, error) {
-	if cfg.AuthBaseURL == "" || cfg.AuthInternalToken == "" {
+	if cfg.AuthBaseURL == "" || cfg.AuthIntrospectionInternalToken == "" {
 		return nil, nil
 	}
 	introspector, err := pep.NewIntrospector(pep.IntrospectConfig{
 		AuthBaseURL:       cfg.AuthBaseURL,
-		InternalToken:     cfg.AuthInternalToken,
+		InternalToken:     cfg.AuthIntrospectionInternalToken,
 		CookieName:        cfg.SessionCookie,
 		DeviceCookieName:  cfg.DeviceCookie,
 		AllowInsecureHTTP: cfg.AllowInsecureHTTP,

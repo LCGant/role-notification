@@ -7,6 +7,7 @@ import (
 	"expvar"
 	"io"
 	"log/slog"
+	"net/mail"
 	nethttp "net/http"
 	"strconv"
 	"strings"
@@ -72,7 +73,7 @@ func New(cfg config.Config, logger *slog.Logger, svc *delivery.Service, inbox ba
 	if err != nil {
 		panic(err)
 	}
-	return NewWithDependencies(cfg, logger, svc, inbox, authn, authclient.New(cfg.AuthBaseURL, cfg.AuthInternalToken))
+	return NewWithDependencies(cfg, logger, svc, inbox, authn, authclient.New(cfg.AuthBaseURL, cfg.AuthUserLookupInternalToken))
 }
 
 func NewWithDependencies(cfg config.Config, logger *slog.Logger, svc *delivery.Service, inbox basestore.InboxStore, authn Authenticator, users *authclient.Client) nethttp.Handler {
@@ -98,9 +99,9 @@ func (s *Server) routes() {
 		writeJSON(w, nethttp.StatusOK, map[string]string{"status": "ok"})
 	})
 	s.mux.Handle("/metrics", s.metricsGuard(expvar.Handler()))
-	s.mux.Handle("POST /internal/email-verification", s.internal(s.handleVerification))
-	s.mux.Handle("POST /internal/password-reset", s.internal(s.handlePasswordReset))
-	s.mux.Handle("POST /internal/social", s.internal(s.handleSocial))
+	s.mux.Handle("POST /internal/email-verification", s.internalWithToken(s.cfg.VerificationInternalToken, s.handleVerification))
+	s.mux.Handle("POST /internal/password-reset", s.internalWithToken(s.cfg.PasswordResetInternalToken, s.handlePasswordReset))
+	s.mux.Handle("POST /internal/social", s.internalWithToken(s.cfg.SocialInternalToken, s.handleSocial))
 	s.mux.Handle("GET /{$}", s.authenticated(s.handleListNotifications))
 	s.mux.Handle("GET /unread-count", s.authenticated(s.handleUnreadCount))
 	s.mux.Handle("POST /read-all", s.authenticated(s.handleReadAllNotifications))
@@ -111,9 +112,9 @@ func (s *Server) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
 	s.mux.ServeHTTP(w, r)
 }
 
-func (s *Server) internal(next nethttp.HandlerFunc) nethttp.Handler {
+func (s *Server) internalWithToken(token string, next nethttp.HandlerFunc) nethttp.Handler {
 	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
-		if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(r.Header.Get("X-Internal-Token"))), []byte(s.cfg.InternalToken)) != 1 {
+		if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(r.Header.Get("X-Internal-Token"))), []byte(token)) != 1 {
 			writeError(w, nethttp.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -141,11 +142,17 @@ func (s *Server) handleVerification(w nethttp.ResponseWriter, r *nethttp.Request
 		writeError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
+	req.To = strings.TrimSpace(req.To)
+	req.Token = strings.TrimSpace(req.Token)
 	if req.To == "" || req.Token == "" {
 		writeError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
-	if err := s.deliverer.EnqueueVerification(r.Context(), strings.TrimSpace(req.To), strings.TrimSpace(req.Token)); err != nil {
+	if _, err := normalizeEmailAddress(req.To); err != nil {
+		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		return
+	}
+	if err := s.deliverer.EnqueueVerification(r.Context(), req.To, req.Token); err != nil {
 		s.logger.Error("enqueue verification failed", "err", err)
 		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
 		return
@@ -159,11 +166,17 @@ func (s *Server) handlePasswordReset(w nethttp.ResponseWriter, r *nethttp.Reques
 		writeError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
+	req.To = strings.TrimSpace(req.To)
+	req.Token = strings.TrimSpace(req.Token)
 	if req.To == "" || req.Token == "" {
 		writeError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
-	if err := s.deliverer.EnqueuePasswordReset(r.Context(), strings.TrimSpace(req.To), strings.TrimSpace(req.Token)); err != nil {
+	if _, err := normalizeEmailAddress(req.To); err != nil {
+		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		return
+	}
+	if err := s.deliverer.EnqueuePasswordReset(r.Context(), req.To, req.Token); err != nil {
 		s.logger.Error("enqueue password reset failed", "err", err)
 		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
 		return
@@ -182,8 +195,26 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 	req.Kind = strings.TrimSpace(strings.ToLower(req.Kind))
 	req.Subject = strings.TrimSpace(req.Subject)
 	req.Body = strings.TrimSpace(req.Body)
-	if req.UserID <= 0 || req.TenantID == "" || req.Kind == "" || req.Subject == "" || req.Body == "" {
+	if req.UserID <= 0 || req.TenantID == "" || req.Kind == "" || req.Subject == "" || req.Body == "" || req.To != "" {
 		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		return
+	}
+	if !isAllowedSocialKind(req.Kind) || !validHeaderValue(req.Subject) {
+		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		return
+	}
+	if s.authUsers == nil {
+		writeError(w, nethttp.StatusServiceUnavailable, "auth_unavailable")
+		return
+	}
+	user, lookupErr := s.authUsers.LookupUser(r.Context(), req.UserID, req.TenantID)
+	if lookupErr != nil {
+		s.logger.Warn("notification user lookup failed", "user_id", req.UserID, "tenant_id", req.TenantID, "err", lookupErr)
+		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
+		return
+	}
+	if user == nil || user.ID != req.UserID || !strings.EqualFold(strings.TrimSpace(user.TenantID), req.TenantID) {
+		writeError(w, nethttp.StatusNotFound, "not_found")
 		return
 	}
 	publicID, err := basestore.NewPublicID()
@@ -206,21 +237,39 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}
-	email := req.To
-	if email == "" && s.authUsers != nil {
-		user, lookupErr := s.authUsers.LookupUser(r.Context(), req.UserID, req.TenantID)
-		if lookupErr != nil {
-			s.logger.Warn("notification user lookup failed", "user_id", req.UserID, "tenant_id", req.TenantID, "err", lookupErr)
-		} else if user != nil {
-			email = strings.TrimSpace(user.Email)
-		}
-	}
+	email := strings.TrimSpace(user.Email)
 	if email != "" {
 		if err := s.deliverer.EnqueueSocial(r.Context(), email, req.Subject, req.Body); err != nil {
 			s.logger.Warn("enqueue social notification email failed", "user_id", req.UserID, "tenant_id", req.TenantID, "err", err)
 		}
 	}
 	writeJSON(w, nethttp.StatusAccepted, map[string]any{"status": "queued", "notification_id": notification.PublicID})
+}
+
+func normalizeEmailAddress(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" || !validHeaderValue(value) {
+		return "", errors.New("invalid email")
+	}
+	addr, err := mail.ParseAddress(value)
+	if err != nil || strings.TrimSpace(addr.Address) == "" {
+		return "", errors.New("invalid email")
+	}
+	return strings.TrimSpace(addr.Address), nil
+}
+
+func validHeaderValue(value string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && !strings.ContainsAny(value, "\r\n")
+}
+
+func isAllowedSocialKind(value string) bool {
+	switch value {
+	case "follow", "friend_request", "friend_accept", "post_comment", "event_invite", "playlist_share", "playlist_collaborator":
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *Server) authenticated(next func(nethttp.ResponseWriter, *nethttp.Request, viewer)) nethttp.Handler {

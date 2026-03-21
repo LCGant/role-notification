@@ -21,12 +21,9 @@ type Client struct {
 }
 
 type User struct {
-	ID            int64  `json:"id"`
-	TenantID      string `json:"tenant_id"`
-	Email         string `json:"email"`
-	Username      string `json:"username"`
-	EmailVerified bool   `json:"email_verified"`
-	Status        string `json:"status"`
+	ID       int64  `json:"id"`
+	TenantID string `json:"tenant_id"`
+	Email    string `json:"email"`
 }
 
 type userResponse struct {
