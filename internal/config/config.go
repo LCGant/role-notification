@@ -9,14 +9,20 @@ import (
 )
 
 type Config struct {
-	HTTPAddr      string
-	InternalToken string
-	MetricsToken  string
-	LogLevel      string
-	Env           string
-	QueueDir      string
-	QueueKey      []byte
-	Mail          MailConfig
+	HTTPAddr          string
+	DBURL             string
+	InternalToken     string
+	MetricsToken      string
+	LogLevel          string
+	Env               string
+	QueueDir          string
+	QueueKey          []byte
+	AuthBaseURL       string
+	AuthInternalToken string
+	SessionCookie     string
+	DeviceCookie      string
+	AllowInsecureHTTP bool
+	Mail              MailConfig
 }
 
 type MailConfig struct {
@@ -33,12 +39,18 @@ type MailConfig struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:      getenv("NOTIFICATION_HTTP_ADDR", ":8080"),
-		InternalToken: strings.TrimSpace(os.Getenv("NOTIFICATION_INTERNAL_TOKEN")),
-		MetricsToken:  strings.TrimSpace(os.Getenv("NOTIFICATION_METRICS_TOKEN")),
-		LogLevel:      getenv("NOTIFICATION_LOG_LEVEL", "info"),
-		Env:           getenv("NOTIFICATION_ENV", "development"),
-		QueueDir:      strings.TrimSpace(getenv("NOTIFICATION_QUEUE_DIR", "/tmp/notification-queue")),
+		HTTPAddr:          getenv("NOTIFICATION_HTTP_ADDR", ":8080"),
+		DBURL:             strings.TrimSpace(getenv("NOTIFICATION_DB_URL", getenv("DATABASE_URL", ""))),
+		InternalToken:     strings.TrimSpace(os.Getenv("NOTIFICATION_INTERNAL_TOKEN")),
+		MetricsToken:      strings.TrimSpace(os.Getenv("NOTIFICATION_METRICS_TOKEN")),
+		LogLevel:          getenv("NOTIFICATION_LOG_LEVEL", "info"),
+		Env:               getenv("NOTIFICATION_ENV", "development"),
+		QueueDir:          strings.TrimSpace(getenv("NOTIFICATION_QUEUE_DIR", "/tmp/notification-queue")),
+		AuthBaseURL:       strings.TrimSpace(getenv("NOTIFICATION_AUTH_BASE_URL", "")),
+		AuthInternalToken: strings.TrimSpace(getenv("NOTIFICATION_AUTH_INTERNAL_TOKEN", "")),
+		SessionCookie:     strings.TrimSpace(getenv("NOTIFICATION_SESSION_COOKIE", "session_id")),
+		DeviceCookie:      strings.TrimSpace(getenv("NOTIFICATION_DEVICE_COOKIE", "device_id")),
+		AllowInsecureHTTP: envBool("NOTIFICATION_AUTH_ALLOW_INSECURE_HTTP", false),
 		Mail: MailConfig{
 			OutboxDir:                    strings.TrimSpace(os.Getenv("EMAIL_OUTBOX_DIR")),
 			SMTPHost:                     strings.TrimSpace(os.Getenv("SMTP_HOST")),
@@ -82,6 +94,12 @@ func Load() (Config, error) {
 	}
 	if strings.EqualFold(strings.TrimSpace(cfg.Env), "production") && cfg.Mail.OutboxDir != "" {
 		return Config{}, errors.New("EMAIL_OUTBOX_DIR is not allowed in production")
+	}
+	if cfg.AuthBaseURL != "" && cfg.AuthInternalToken == "" {
+		return Config{}, errors.New("NOTIFICATION_AUTH_INTERNAL_TOKEN is required when NOTIFICATION_AUTH_BASE_URL is set")
+	}
+	if cfg.AuthBaseURL == "" && cfg.AuthInternalToken != "" {
+		return Config{}, errors.New("NOTIFICATION_AUTH_BASE_URL is required when NOTIFICATION_AUTH_INTERNAL_TOKEN is set")
 	}
 	return cfg, nil
 }

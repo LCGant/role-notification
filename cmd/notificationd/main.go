@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -14,6 +15,10 @@ import (
 	"github.com/LCGant/role-notification/internal/delivery"
 	httpserver "github.com/LCGant/role-notification/internal/http"
 	"github.com/LCGant/role-notification/internal/sender"
+	basestore "github.com/LCGant/role-notification/internal/store"
+	"github.com/LCGant/role-notification/internal/store/memory"
+	"github.com/LCGant/role-notification/internal/store/postgres"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func main() {
@@ -36,11 +41,33 @@ func main() {
 
 	backend := sender.New(cfg.Mail)
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, backend, logger)
+	var inbox basestore.InboxStore
+	var closeDB func()
+	if cfg.DBURL != "" {
+		db, err := sql.Open("pgx", cfg.DBURL)
+		if err != nil {
+			logger.Error("connect db failed", "err", err)
+			os.Exit(1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := db.PingContext(ctx); err != nil {
+			logger.Error("db ping failed", "err", err)
+			os.Exit(1)
+		}
+		inbox = postgres.New(db)
+		closeDB = func() { _ = db.Close() }
+	} else {
+		inbox = memory.New()
+	}
+	if closeDB != nil {
+		defer closeDB()
+	}
 	workerCtx, stopWorkers := context.WithCancel(context.Background())
 	defer stopWorkers()
 	server := &http.Server{
 		Addr:              cfg.HTTPAddr,
-		Handler:           httpserver.New(cfg, logger, queue),
+		Handler:           httpserver.New(cfg, logger, queue, inbox),
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      15 * time.Second,
 		IdleTimeout:       60 * time.Second,

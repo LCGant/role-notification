@@ -8,10 +8,15 @@ import (
 	"io"
 	"log/slog"
 	nethttp "net/http"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/LCGant/role-notification/internal/authclient"
 	"github.com/LCGant/role-notification/internal/config"
 	"github.com/LCGant/role-notification/internal/delivery"
+	basestore "github.com/LCGant/role-notification/internal/store"
+	"github.com/LCGant/role-notification/internal/store/memory"
 )
 
 const maxBodyBytes = 1 << 20
@@ -20,6 +25,9 @@ type Server struct {
 	cfg       config.Config
 	logger    *slog.Logger
 	deliverer *delivery.Service
+	inbox     basestore.InboxStore
+	authn     Authenticator
+	authUsers *authclient.Client
 	mux       *nethttp.ServeMux
 }
 
@@ -29,16 +37,39 @@ type deliveryRequest struct {
 }
 
 type socialDeliveryRequest struct {
-	To      string `json:"to"`
-	Subject string `json:"subject"`
-	Body    string `json:"body"`
+	UserID   int64  `json:"user_id"`
+	TenantID string `json:"tenant_id"`
+	To       string `json:"to,omitempty"`
+	Kind     string `json:"kind"`
+	Subject  string `json:"subject"`
+	Body     string `json:"body"`
 }
 
-func New(cfg config.Config, logger *slog.Logger, svc *delivery.Service) nethttp.Handler {
+type notificationListResponse struct {
+	Notifications []basestore.Notification `json:"notifications"`
+	Total         int                      `json:"total"`
+	NextOffset    *int                     `json:"next_offset,omitempty"`
+}
+
+func New(cfg config.Config, logger *slog.Logger, svc *delivery.Service, inbox basestore.InboxStore) nethttp.Handler {
+	authn, err := newAuthenticator(cfg)
+	if err != nil {
+		panic(err)
+	}
+	return NewWithDependencies(cfg, logger, svc, inbox, authn, authclient.New(cfg.AuthBaseURL, cfg.AuthInternalToken))
+}
+
+func NewWithDependencies(cfg config.Config, logger *slog.Logger, svc *delivery.Service, inbox basestore.InboxStore, authn Authenticator, users *authclient.Client) nethttp.Handler {
+	if inbox == nil {
+		inbox = memory.New()
+	}
 	s := &Server{
 		cfg:       cfg,
 		logger:    logger,
 		deliverer: svc,
+		inbox:     inbox,
+		authn:     authn,
+		authUsers: users,
 		mux:       nethttp.NewServeMux(),
 	}
 	s.routes()
@@ -54,6 +85,10 @@ func (s *Server) routes() {
 	s.mux.Handle("POST /internal/email-verification", s.internal(s.handleVerification))
 	s.mux.Handle("POST /internal/password-reset", s.internal(s.handlePasswordReset))
 	s.mux.Handle("POST /internal/social", s.internal(s.handleSocial))
+	s.mux.Handle("GET /{$}", s.authenticated(s.handleListNotifications))
+	s.mux.Handle("GET /unread-count", s.authenticated(s.handleUnreadCount))
+	s.mux.Handle("POST /read-all", s.authenticated(s.handleReadAllNotifications))
+	s.mux.Handle("POST /{id}/read", s.authenticated(s.handleReadNotification))
 }
 
 func (s *Server) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -126,19 +161,140 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 		writeError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
+	req.TenantID = strings.TrimSpace(req.TenantID)
 	req.To = strings.TrimSpace(req.To)
+	req.Kind = strings.TrimSpace(strings.ToLower(req.Kind))
 	req.Subject = strings.TrimSpace(req.Subject)
 	req.Body = strings.TrimSpace(req.Body)
-	if req.To == "" || req.Subject == "" || req.Body == "" {
+	if req.UserID <= 0 || req.TenantID == "" || req.Kind == "" || req.Subject == "" || req.Body == "" {
 		writeError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
-	if err := s.deliverer.EnqueueSocial(r.Context(), req.To, req.Subject, req.Body); err != nil {
-		s.logger.Error("enqueue social notification failed", "err", err)
+	publicID, err := basestore.NewPublicID()
+	if err != nil {
+		s.logger.Error("generate notification id failed", "err", err)
 		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}
-	writeJSON(w, nethttp.StatusAccepted, map[string]string{"status": "queued"})
+	notification, err := s.inbox.CreateNotification(r.Context(), basestore.Notification{
+		PublicID:  publicID,
+		TenantID:  req.TenantID,
+		UserID:    req.UserID,
+		Kind:      req.Kind,
+		Subject:   req.Subject,
+		Body:      req.Body,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		s.logger.Error("store social notification failed", "err", err)
+		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
+		return
+	}
+	email := req.To
+	if email == "" && s.authUsers != nil {
+		user, lookupErr := s.authUsers.LookupUser(r.Context(), req.UserID, req.TenantID)
+		if lookupErr != nil {
+			s.logger.Warn("notification user lookup failed", "user_id", req.UserID, "tenant_id", req.TenantID, "err", lookupErr)
+		} else if user != nil {
+			email = strings.TrimSpace(user.Email)
+		}
+	}
+	if email != "" {
+		if err := s.deliverer.EnqueueSocial(r.Context(), email, req.Subject, req.Body); err != nil {
+			s.logger.Warn("enqueue social notification email failed", "user_id", req.UserID, "tenant_id", req.TenantID, "err", err)
+		}
+	}
+	writeJSON(w, nethttp.StatusAccepted, map[string]any{"status": "queued", "notification_id": notification.PublicID})
+}
+
+func (s *Server) authenticated(next func(nethttp.ResponseWriter, *nethttp.Request, viewer)) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		if s.authn == nil {
+			writeError(w, nethttp.StatusServiceUnavailable, "auth_unavailable")
+			return
+		}
+		v, err := s.authn.Required(r.Context(), r)
+		if err != nil {
+			if errors.Is(err, ErrUnauthorized) {
+				writeError(w, nethttp.StatusUnauthorized, "unauthorized")
+				return
+			}
+			writeError(w, nethttp.StatusBadGateway, "auth_unavailable")
+			return
+		}
+		next(w, r, v)
+	})
+}
+
+func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Request, viewer viewer) {
+	limit := 20
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed <= 0 || parsed > 100 {
+			writeError(w, nethttp.StatusBadRequest, "bad_request")
+			return
+		}
+		limit = parsed
+	}
+	offset := 0
+	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 0 {
+			writeError(w, nethttp.StatusBadRequest, "bad_request")
+			return
+		}
+		offset = parsed
+	}
+	notifications, total, err := s.inbox.ListNotifications(r.Context(), viewer.TenantID, viewer.UserID, limit, offset)
+	if err != nil {
+		s.logger.Error("list notifications failed", "err", err)
+		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		return
+	}
+	var nextOffset *int
+	if offset+len(notifications) < total {
+		value := offset + len(notifications)
+		nextOffset = &value
+	}
+	writeJSON(w, nethttp.StatusOK, notificationListResponse{
+		Notifications: notifications,
+		Total:         total,
+		NextOffset:    nextOffset,
+	})
+}
+
+func (s *Server) handleUnreadCount(w nethttp.ResponseWriter, r *nethttp.Request, viewer viewer) {
+	count, err := s.inbox.CountUnread(r.Context(), viewer.TenantID, viewer.UserID)
+	if err != nil {
+		s.logger.Error("count unread notifications failed", "err", err)
+		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]int{"unread_count": count})
+}
+
+func (s *Server) handleReadNotification(w nethttp.ResponseWriter, r *nethttp.Request, viewer viewer) {
+	notification, err := s.inbox.MarkNotificationRead(r.Context(), viewer.TenantID, viewer.UserID, strings.TrimSpace(r.PathValue("id")), time.Now().UTC())
+	if err != nil {
+		if errors.Is(err, basestore.ErrNotFound) {
+			writeError(w, nethttp.StatusNotFound, "not_found")
+			return
+		}
+		s.logger.Error("mark notification read failed", "err", err)
+		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]basestore.Notification{"notification": notification})
+}
+
+func (s *Server) handleReadAllNotifications(w nethttp.ResponseWriter, r *nethttp.Request, viewer viewer) {
+	updated, err := s.inbox.MarkAllNotificationsRead(r.Context(), viewer.TenantID, viewer.UserID, time.Now().UTC())
+	if err != nil {
+		s.logger.Error("mark all notifications read failed", "err", err)
+		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]int{"marked_read": updated})
 }
 
 func decodeJSON(r *nethttp.Request, dst any) error {
