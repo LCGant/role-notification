@@ -28,6 +28,12 @@ type deliveryRequest struct {
 	Token string `json:"token"`
 }
 
+type socialDeliveryRequest struct {
+	To      string `json:"to"`
+	Subject string `json:"subject"`
+	Body    string `json:"body"`
+}
+
 func New(cfg config.Config, logger *slog.Logger, svc *delivery.Service) nethttp.Handler {
 	s := &Server{
 		cfg:       cfg,
@@ -47,6 +53,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/metrics", s.metricsGuard(expvar.Handler()))
 	s.mux.Handle("POST /internal/email-verification", s.internal(s.handleVerification))
 	s.mux.Handle("POST /internal/password-reset", s.internal(s.handlePasswordReset))
+	s.mux.Handle("POST /internal/social", s.internal(s.handleSocial))
 }
 
 func (s *Server) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -107,6 +114,27 @@ func (s *Server) handlePasswordReset(w nethttp.ResponseWriter, r *nethttp.Reques
 	}
 	if err := s.deliverer.EnqueuePasswordReset(r.Context(), strings.TrimSpace(req.To), strings.TrimSpace(req.Token)); err != nil {
 		s.logger.Error("enqueue password reset failed", "err", err)
+		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
+		return
+	}
+	writeJSON(w, nethttp.StatusAccepted, map[string]string{"status": "queued"})
+}
+
+func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
+	var req socialDeliveryRequest
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		return
+	}
+	req.To = strings.TrimSpace(req.To)
+	req.Subject = strings.TrimSpace(req.Subject)
+	req.Body = strings.TrimSpace(req.Body)
+	if req.To == "" || req.Subject == "" || req.Body == "" {
+		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		return
+	}
+	if err := s.deliverer.EnqueueSocial(r.Context(), req.To, req.Subject, req.Body); err != nil {
+		s.logger.Error("enqueue social notification failed", "err", err)
 		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}

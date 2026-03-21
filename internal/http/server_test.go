@@ -66,6 +66,26 @@ func TestInternalVerificationRejectsTrailingJSONData(t *testing.T) {
 	}
 }
 
+func TestSocialNotificationWritesOutbox(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{InternalToken: "secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{4}, 32), Mail: config.MailConfig{OutboxDir: dir}}
+	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go queue.Run(ctx)
+	h := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue)
+
+	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"to":"u@example.com","subject":"New follower","body":"Alice started following you."}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", rr.Code)
+	}
+	waitForOutboxToken(t, dir, "Alice started following you.")
+}
+
 func waitForOutboxToken(t *testing.T, dir, token string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)

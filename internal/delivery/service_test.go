@@ -39,6 +39,13 @@ func (s *stubSender) SendPasswordReset(ctx context.Context, to, token string) er
 	return nil
 }
 
+func (s *stubSender) SendSocial(ctx context.Context, to, subject, body string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sent = append(s.sent, "social:"+subject)
+	return nil
+}
+
 func TestQueuePayloadIsEncryptedAtRest(t *testing.T) {
 	dir := t.TempDir()
 	key := bytes.Repeat([]byte{7}, 32)
@@ -102,6 +109,10 @@ func (s *blockingSender) SendVerification(ctx context.Context, to, token string)
 
 func (s *blockingSender) SendPasswordReset(ctx context.Context, to, token string) error {
 	return errors.New("unexpected password reset dispatch")
+}
+
+func (s *blockingSender) SendSocial(ctx context.Context, to, subject, body string) error {
+	return errors.New("unexpected social dispatch")
 }
 
 func TestProcessPendingClaimsJobsAtomically(t *testing.T) {

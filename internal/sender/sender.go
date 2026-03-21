@@ -19,6 +19,7 @@ import (
 type Sender interface {
 	SendVerification(ctx context.Context, to, token string) error
 	SendPasswordReset(ctx context.Context, to, token string) error
+	SendSocial(ctx context.Context, to, subject, body string) error
 }
 
 func New(cfg config.MailConfig) Sender {
@@ -38,6 +39,10 @@ func (s *smtpSender) SendVerification(ctx context.Context, to, token string) err
 
 func (s *smtpSender) SendPasswordReset(ctx context.Context, to, token string) error {
 	return s.send(ctx, to, "Reset your password", passwordResetBody(s.cfg, token))
+}
+
+func (s *smtpSender) SendSocial(ctx context.Context, to, subject, body string) error {
+	return s.send(ctx, to, strings.TrimSpace(subject), strings.TrimSpace(body))
 }
 
 func (s *smtpSender) send(ctx context.Context, to, subject, body string) error {
@@ -108,6 +113,10 @@ func (o *outboxSender) SendVerification(ctx context.Context, to, token string) e
 
 func (o *outboxSender) SendPasswordReset(ctx context.Context, to, token string) error {
 	return o.write(ctx, "reset", to, passwordResetBody(o.cfg, token))
+}
+
+func (o *outboxSender) SendSocial(ctx context.Context, to, subject, body string) error {
+	return o.write(ctx, "social", to, buildMessage(o.cfg.SMTPFrom, to, strings.TrimSpace(subject), strings.TrimSpace(body)))
 }
 
 func (o *outboxSender) write(ctx context.Context, prefix, to, body string) error {

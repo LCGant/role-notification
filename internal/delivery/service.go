@@ -24,12 +24,15 @@ type Kind string
 const (
 	KindVerification  Kind = "verification"
 	KindPasswordReset Kind = "password_reset"
+	KindSocial        Kind = "social"
 )
 
 type Job struct {
 	Kind          Kind      `json:"kind"`
 	To            string    `json:"to"`
 	Token         string    `json:"token"`
+	Subject       string    `json:"subject,omitempty"`
+	Body          string    `json:"body,omitempty"`
 	CreatedAt     time.Time `json:"created_at"`
 	Attempts      int       `json:"attempts,omitempty"`
 	NextAttemptAt time.Time `json:"next_attempt_at,omitempty"`
@@ -70,6 +73,16 @@ func (s *Service) EnqueuePasswordReset(ctx context.Context, to, token string) er
 		Kind:      KindPasswordReset,
 		To:        strings.TrimSpace(to),
 		Token:     strings.TrimSpace(token),
+		CreatedAt: time.Now().UTC(),
+	})
+}
+
+func (s *Service) EnqueueSocial(ctx context.Context, to, subject, body string) error {
+	return s.enqueue(ctx, Job{
+		Kind:      KindSocial,
+		To:        strings.TrimSpace(to),
+		Subject:   strings.TrimSpace(subject),
+		Body:      strings.TrimSpace(body),
 		CreatedAt: time.Now().UTC(),
 	})
 }
@@ -167,6 +180,8 @@ func (s *Service) dispatch(ctx context.Context, job Job) error {
 		return s.sender.SendVerification(ctx, job.To, job.Token)
 	case KindPasswordReset:
 		return s.sender.SendPasswordReset(ctx, job.To, job.Token)
+	case KindSocial:
+		return s.sender.SendSocial(ctx, job.To, job.Subject, job.Body)
 	default:
 		return fmt.Errorf("unsupported notification kind %q", job.Kind)
 	}
