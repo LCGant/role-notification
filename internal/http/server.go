@@ -45,10 +45,26 @@ type socialDeliveryRequest struct {
 	Body     string `json:"body"`
 }
 
+type notificationResponse struct {
+	ID        string     `json:"id"`
+	Kind      string     `json:"kind"`
+	KindLabel string     `json:"kind_label"`
+	KindGroup string     `json:"kind_group"`
+	Subject   string     `json:"subject"`
+	Body      string     `json:"body"`
+	CreatedAt time.Time  `json:"created_at"`
+	ReadAt    *time.Time `json:"read_at,omitempty"`
+	IsRead    bool       `json:"is_read"`
+}
+
 type notificationListResponse struct {
-	Notifications []basestore.Notification `json:"notifications"`
-	Total         int                      `json:"total"`
-	NextOffset    *int                     `json:"next_offset,omitempty"`
+	Notifications []notificationResponse `json:"notifications"`
+	Total         int                    `json:"total"`
+	UnreadCount   int                    `json:"unread_count"`
+	Limit         int                    `json:"limit"`
+	Offset        int                    `json:"offset"`
+	HasMore       bool                   `json:"has_more"`
+	NextOffset    *int                   `json:"next_offset,omitempty"`
 }
 
 func New(cfg config.Config, logger *slog.Logger, svc *delivery.Service, inbox basestore.InboxStore) nethttp.Handler {
@@ -251,14 +267,25 @@ func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Re
 		writeError(w, nethttp.StatusBadGateway, "unavailable")
 		return
 	}
+	unreadCount, err := s.inbox.CountUnread(r.Context(), viewer.TenantID, viewer.UserID)
+	if err != nil {
+		s.logger.Error("count unread notifications failed", "err", err)
+		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		return
+	}
+	hasMore := offset+len(notifications) < total
 	var nextOffset *int
-	if offset+len(notifications) < total {
+	if hasMore {
 		value := offset + len(notifications)
 		nextOffset = &value
 	}
 	writeJSON(w, nethttp.StatusOK, notificationListResponse{
-		Notifications: notifications,
+		Notifications: presentNotifications(notifications),
 		Total:         total,
+		UnreadCount:   unreadCount,
+		Limit:         limit,
+		Offset:        offset,
+		HasMore:       hasMore,
 		NextOffset:    nextOffset,
 	})
 }
@@ -284,7 +311,16 @@ func (s *Server) handleReadNotification(w nethttp.ResponseWriter, r *nethttp.Req
 		writeError(w, nethttp.StatusBadGateway, "unavailable")
 		return
 	}
-	writeJSON(w, nethttp.StatusOK, map[string]basestore.Notification{"notification": notification})
+	unreadCount, err := s.inbox.CountUnread(r.Context(), viewer.TenantID, viewer.UserID)
+	if err != nil {
+		s.logger.Error("count unread notifications failed", "err", err)
+		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		return
+	}
+	writeJSON(w, nethttp.StatusOK, map[string]any{
+		"notification": presentNotification(notification),
+		"unread_count": unreadCount,
+	})
 }
 
 func (s *Server) handleReadAllNotifications(w nethttp.ResponseWriter, r *nethttp.Request, viewer viewer) {
@@ -294,7 +330,66 @@ func (s *Server) handleReadAllNotifications(w nethttp.ResponseWriter, r *nethttp
 		writeError(w, nethttp.StatusBadGateway, "unavailable")
 		return
 	}
-	writeJSON(w, nethttp.StatusOK, map[string]int{"marked_read": updated})
+	writeJSON(w, nethttp.StatusOK, map[string]int{
+		"marked_read":  updated,
+		"unread_count": 0,
+	})
+}
+
+func presentNotifications(in []basestore.Notification) []notificationResponse {
+	out := make([]notificationResponse, 0, len(in))
+	for _, notification := range in {
+		out = append(out, presentNotification(notification))
+	}
+	return out
+}
+
+func presentNotification(notification basestore.Notification) notificationResponse {
+	return notificationResponse{
+		ID:        notification.PublicID,
+		Kind:      notification.Kind,
+		KindLabel: kindLabel(notification.Kind),
+		KindGroup: kindGroup(notification.Kind),
+		Subject:   notification.Subject,
+		Body:      notification.Body,
+		CreatedAt: notification.CreatedAt,
+		ReadAt:    notification.ReadAt,
+		IsRead:    notification.ReadAt != nil,
+	}
+}
+
+func kindLabel(kind string) string {
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case "follow":
+		return "New follower"
+	case "friend_request":
+		return "Friend request"
+	case "friend_accept":
+		return "Friend request accepted"
+	case "post_comment":
+		return "New comment"
+	case "playlist_share":
+		return "Playlist shared"
+	case "playlist_collaborator":
+		return "Playlist collaborator access"
+	case "event_invite":
+		return "Event invitation"
+	default:
+		return "Notification"
+	}
+}
+
+func kindGroup(kind string) string {
+	switch strings.TrimSpace(strings.ToLower(kind)) {
+	case "follow", "friend_request", "friend_accept":
+		return "social_graph"
+	case "post_comment", "playlist_share", "playlist_collaborator":
+		return "content"
+	case "event_invite":
+		return "events"
+	default:
+		return "system"
+	}
 }
 
 func decodeJSON(r *nethttp.Request, dst any) error {

@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -133,8 +134,32 @@ func TestNotificationInboxEndpoints(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 list, got %d", rr.Code)
 	}
-	if !bytes.Contains(rr.Body.Bytes(), []byte(id2)) {
-		t.Fatalf("expected list response to contain notification %s, got %s", id2, rr.Body.String())
+	var listResp struct {
+		Notifications []struct {
+			ID        string     `json:"id"`
+			Kind      string     `json:"kind"`
+			KindLabel string     `json:"kind_label"`
+			KindGroup string     `json:"kind_group"`
+			IsRead    bool       `json:"is_read"`
+			ReadAt    *time.Time `json:"read_at"`
+		} `json:"notifications"`
+		Total       int  `json:"total"`
+		UnreadCount int  `json:"unread_count"`
+		Limit       int  `json:"limit"`
+		Offset      int  `json:"offset"`
+		HasMore     bool `json:"has_more"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &listResp); err != nil {
+		t.Fatalf("decode list response: %v body=%s", err, rr.Body.String())
+	}
+	if listResp.Total != 2 || listResp.UnreadCount != 2 || listResp.Limit != 10 || listResp.Offset != 0 || listResp.HasMore {
+		t.Fatalf("unexpected list metadata: %+v", listResp)
+	}
+	if len(listResp.Notifications) != 2 || listResp.Notifications[0].ID != id2 {
+		t.Fatalf("expected list response to contain notification %s first, got %+v", id2, listResp.Notifications)
+	}
+	if listResp.Notifications[0].KindLabel == "" || listResp.Notifications[0].KindGroup == "" || listResp.Notifications[0].IsRead {
+		t.Fatalf("unexpected notification presentation: %+v", listResp.Notifications[0])
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/"+id2+"/read", nil)
@@ -143,12 +168,36 @@ func TestNotificationInboxEndpoints(t *testing.T) {
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 read, got %d", rr.Code)
 	}
+	var readResp struct {
+		Notification struct {
+			ID     string     `json:"id"`
+			IsRead bool       `json:"is_read"`
+			ReadAt *time.Time `json:"read_at"`
+		} `json:"notification"`
+		UnreadCount int `json:"unread_count"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &readResp); err != nil {
+		t.Fatalf("decode read response: %v body=%s", err, rr.Body.String())
+	}
+	if readResp.Notification.ID != id2 || !readResp.Notification.IsRead || readResp.Notification.ReadAt == nil || readResp.UnreadCount != 1 {
+		t.Fatalf("unexpected read response: %+v", readResp)
+	}
 
 	req = httptest.NewRequest(http.MethodPost, "/read-all", nil)
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200 read-all, got %d", rr.Code)
+	}
+	var readAllResp struct {
+		MarkedRead  int `json:"marked_read"`
+		UnreadCount int `json:"unread_count"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &readAllResp); err != nil {
+		t.Fatalf("decode read-all response: %v body=%s", err, rr.Body.String())
+	}
+	if readAllResp.MarkedRead != 1 || readAllResp.UnreadCount != 0 {
+		t.Fatalf("unexpected read-all response: %+v", readAllResp)
 	}
 }
 
