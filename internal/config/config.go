@@ -10,23 +10,23 @@ import (
 )
 
 type Config struct {
-	HTTPAddr          string
-	DBURL             string
-	VerificationInternalToken string
-	PasswordResetInternalToken string
-	SocialInternalToken       string
-	MetricsToken      string
-	LogLevel          string
-	Env               string
-	QueueDir          string
-	QueueKey          []byte
-	AuthBaseURL       string
+	HTTPAddr                       string
+	DBURL                          string
+	VerificationInternalToken      string
+	PasswordResetInternalToken     string
+	SocialInternalToken            string
+	MetricsToken                   string
+	LogLevel                       string
+	Env                            string
+	QueueDir                       string
+	QueueKey                       []byte
+	AuthBaseURL                    string
 	AuthIntrospectionInternalToken string
 	AuthUserLookupInternalToken    string
-	SessionCookie     string
-	DeviceCookie      string
-	AllowInsecureHTTP bool
-	Mail              MailConfig
+	SessionCookie                  string
+	DeviceCookie                   string
+	AllowInsecureHTTP              bool
+	Mail                           MailConfig
 }
 
 type MailConfig struct {
@@ -43,21 +43,21 @@ type MailConfig struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:          envconfig.EnvString("NOTIFICATION_HTTP_ADDR", ":8080"),
-		DBURL:             strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DB_URL", envconfig.EnvString("DATABASE_URL", ""))),
-		VerificationInternalToken:    strings.TrimSpace(os.Getenv("NOTIFICATION_EMAIL_VERIFICATION_INTERNAL_TOKEN")),
-		PasswordResetInternalToken:   strings.TrimSpace(os.Getenv("NOTIFICATION_PASSWORD_RESET_INTERNAL_TOKEN")),
-		SocialInternalToken:          strings.TrimSpace(os.Getenv("NOTIFICATION_SOCIAL_INTERNAL_TOKEN")),
-		MetricsToken:      strings.TrimSpace(os.Getenv("NOTIFICATION_METRICS_TOKEN")),
-		LogLevel:          envconfig.EnvString("NOTIFICATION_LOG_LEVEL", "info"),
-		Env:               envconfig.EnvString("NOTIFICATION_ENV", "development"),
-		QueueDir:          strings.TrimSpace(envconfig.EnvString("NOTIFICATION_QUEUE_DIR", "/tmp/notification-queue")),
-		AuthBaseURL:       strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_BASE_URL", "")),
+		HTTPAddr:                       envconfig.EnvString("NOTIFICATION_HTTP_ADDR", ":8080"),
+		DBURL:                          strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DB_URL", envconfig.EnvString("DATABASE_URL", ""))),
+		VerificationInternalToken:      strings.TrimSpace(os.Getenv("NOTIFICATION_EMAIL_VERIFICATION_INTERNAL_TOKEN")),
+		PasswordResetInternalToken:     strings.TrimSpace(os.Getenv("NOTIFICATION_PASSWORD_RESET_INTERNAL_TOKEN")),
+		SocialInternalToken:            strings.TrimSpace(os.Getenv("NOTIFICATION_SOCIAL_INTERNAL_TOKEN")),
+		MetricsToken:                   strings.TrimSpace(os.Getenv("NOTIFICATION_METRICS_TOKEN")),
+		LogLevel:                       envconfig.EnvString("NOTIFICATION_LOG_LEVEL", "info"),
+		Env:                            envconfig.EnvString("NOTIFICATION_ENV", "development"),
+		QueueDir:                       strings.TrimSpace(envconfig.EnvString("NOTIFICATION_QUEUE_DIR", "/tmp/notification-queue")),
+		AuthBaseURL:                    strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_BASE_URL", "")),
 		AuthIntrospectionInternalToken: strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_INTROSPECTION_INTERNAL_TOKEN", "")),
 		AuthUserLookupInternalToken:    strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_USER_LOOKUP_INTERNAL_TOKEN", "")),
-		SessionCookie:     strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SESSION_COOKIE", "session_id")),
-		DeviceCookie:      strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DEVICE_COOKIE", "device_id")),
-		AllowInsecureHTTP: envconfig.EnvBool("NOTIFICATION_AUTH_ALLOW_INSECURE_HTTP", false),
+		SessionCookie:                  strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SESSION_COOKIE", "session_id")),
+		DeviceCookie:                   strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DEVICE_COOKIE", "device_id")),
+		AllowInsecureHTTP:              envconfig.EnvBool("NOTIFICATION_AUTH_ALLOW_INSECURE_HTTP", false),
 		Mail: MailConfig{
 			OutboxDir:                    strings.TrimSpace(os.Getenv("EMAIL_OUTBOX_DIR")),
 			SMTPHost:                     strings.TrimSpace(os.Getenv("SMTP_HOST")),

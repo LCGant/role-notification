@@ -14,11 +14,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Checkout shared libs
+        uses: actions/checkout@v4
+        with:
+          repository: LCGant/role-root
+          path: role-root
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
           cache: true
+      - name: Wire shared libs
+        run: |
+          go mod edit -replace github.com/LCGant/role-config="$GITHUB_WORKSPACE/role-root/libs/config"
+          go mod edit -replace github.com/LCGant/role-crypto="$GITHUB_WORKSPACE/role-root/libs/crypto"
+          go mod edit -replace github.com/LCGant/role-errors="$GITHUB_WORKSPACE/role-root/libs/errors"
+          go mod edit -replace github.com/LCGant/role-httpx="$GITHUB_WORKSPACE/role-root/libs/httpx"
+      - name: Download deps
+        run: go mod download
       - name: Verify formatting
         run: test -z "$(gofmt -l .)"
       - name: Go vet
