@@ -5,9 +5,21 @@ go 1.26.0
 toolchain go1.26.1
 
 require (
+	github.com/LCGant/role-config v0.0.0
+	github.com/LCGant/role-crypto v0.0.0
+	github.com/LCGant/role-errors v0.0.0
+	github.com/LCGant/role-httpx v0.0.0
 	github.com/LCGant/role-pep v0.0.0-20260317112219-be7e459b5a57
 	github.com/jackc/pgx/v5 v5.8.0
 )
+
+replace github.com/LCGant/role-config => ../../libs/config
+
+replace github.com/LCGant/role-crypto => ../../libs/crypto
+
+replace github.com/LCGant/role-errors => ../../libs/errors
+
+replace github.com/LCGant/role-httpx => ../../libs/httpx
 
 require (
 	github.com/jackc/pgpassfile v1.0.0 // indirect

@@ -1,11 +1,8 @@
 package http
 
 import (
-	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"expvar"
-	"io"
 	"log/slog"
 	"net/mail"
 	nethttp "net/http"
@@ -13,14 +10,14 @@ import (
 	"strings"
 	"time"
 
+	libcrypto "github.com/LCGant/role-crypto"
+	"github.com/LCGant/role-httpx"
 	"github.com/LCGant/role-notification/internal/authclient"
 	"github.com/LCGant/role-notification/internal/config"
 	"github.com/LCGant/role-notification/internal/delivery"
 	basestore "github.com/LCGant/role-notification/internal/store"
 	"github.com/LCGant/role-notification/internal/store/memory"
 )
-
-const maxBodyBytes = 1 << 20
 
 type Server struct {
 	cfg       config.Config
@@ -96,7 +93,7 @@ func NewWithDependencies(cfg config.Config, logger *slog.Logger, svc *delivery.S
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		writeJSON(w, nethttp.StatusOK, map[string]string{"status": "ok"})
+		httpx.WriteJSON(w,nethttp.StatusOK, map[string]string{"status": "ok"})
 	})
 	s.mux.Handle("/metrics", s.metricsGuard(expvar.Handler()))
 	s.mux.Handle("POST /internal/email-verification", s.internalWithToken(s.cfg.VerificationInternalToken, s.handleVerification))
@@ -114,8 +111,8 @@ func (s *Server) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
 
 func (s *Server) internalWithToken(token string, next nethttp.HandlerFunc) nethttp.Handler {
 	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
-		if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(r.Header.Get("X-Internal-Token"))), []byte(token)) != 1 {
-			writeError(w, nethttp.StatusUnauthorized, "unauthorized")
+		if !libcrypto.ConstantTimeEqual(strings.TrimSpace(r.Header.Get("X-Internal-Token")), token) {
+			httpx.WriteError(w,nethttp.StatusUnauthorized, "unauthorized")
 			return
 		}
 		next(w, r)
@@ -125,11 +122,11 @@ func (s *Server) internalWithToken(token string, next nethttp.HandlerFunc) netht
 func (s *Server) metricsGuard(next nethttp.Handler) nethttp.Handler {
 	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		if s.cfg.MetricsToken == "" {
-			writeError(w, nethttp.StatusForbidden, "forbidden")
+			httpx.WriteError(w,nethttp.StatusForbidden, "forbidden")
 			return
 		}
-		if subtle.ConstantTimeCompare([]byte(strings.TrimSpace(r.Header.Get("X-Metrics-Token"))), []byte(s.cfg.MetricsToken)) != 1 {
-			writeError(w, nethttp.StatusForbidden, "forbidden")
+		if !libcrypto.ConstantTimeEqual(strings.TrimSpace(r.Header.Get("X-Metrics-Token")), s.cfg.MetricsToken) {
+			httpx.WriteError(w,nethttp.StatusForbidden, "forbidden")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -138,56 +135,56 @@ func (s *Server) metricsGuard(next nethttp.Handler) nethttp.Handler {
 
 func (s *Server) handleVerification(w nethttp.ResponseWriter, r *nethttp.Request) {
 	var req deliveryRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, nethttp.StatusBadRequest, "bad_request")
+	if err := httpx.DecodeJSON(r,&req); err != nil {
+		httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 		return
 	}
 	req.To = strings.TrimSpace(req.To)
 	req.Token = strings.TrimSpace(req.Token)
 	if req.To == "" || req.Token == "" {
-		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 		return
 	}
 	if _, err := normalizeEmailAddress(req.To); err != nil {
-		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 		return
 	}
 	if err := s.deliverer.EnqueueVerification(r.Context(), req.To, req.Token); err != nil {
 		s.logger.Error("enqueue verification failed", "err", err)
-		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}
-	writeJSON(w, nethttp.StatusAccepted, map[string]string{"status": "queued"})
+	httpx.WriteJSON(w,nethttp.StatusAccepted, map[string]string{"status": "queued"})
 }
 
 func (s *Server) handlePasswordReset(w nethttp.ResponseWriter, r *nethttp.Request) {
 	var req deliveryRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, nethttp.StatusBadRequest, "bad_request")
+	if err := httpx.DecodeJSON(r,&req); err != nil {
+		httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 		return
 	}
 	req.To = strings.TrimSpace(req.To)
 	req.Token = strings.TrimSpace(req.Token)
 	if req.To == "" || req.Token == "" {
-		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 		return
 	}
 	if _, err := normalizeEmailAddress(req.To); err != nil {
-		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 		return
 	}
 	if err := s.deliverer.EnqueuePasswordReset(r.Context(), req.To, req.Token); err != nil {
 		s.logger.Error("enqueue password reset failed", "err", err)
-		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}
-	writeJSON(w, nethttp.StatusAccepted, map[string]string{"status": "queued"})
+	httpx.WriteJSON(w,nethttp.StatusAccepted, map[string]string{"status": "queued"})
 }
 
 func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 	var req socialDeliveryRequest
-	if err := decodeJSON(r, &req); err != nil {
-		writeError(w, nethttp.StatusBadRequest, "bad_request")
+	if err := httpx.DecodeJSON(r,&req); err != nil {
+		httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 		return
 	}
 	req.TenantID = strings.TrimSpace(req.TenantID)
@@ -196,31 +193,31 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 	req.Subject = strings.TrimSpace(req.Subject)
 	req.Body = strings.TrimSpace(req.Body)
 	if req.UserID <= 0 || req.TenantID == "" || req.Kind == "" || req.Subject == "" || req.Body == "" || req.To != "" {
-		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 		return
 	}
 	if !isAllowedSocialKind(req.Kind) || !validHeaderValue(req.Subject) {
-		writeError(w, nethttp.StatusBadRequest, "bad_request")
+		httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 		return
 	}
 	if s.authUsers == nil {
-		writeError(w, nethttp.StatusServiceUnavailable, "auth_unavailable")
+		httpx.WriteError(w,nethttp.StatusServiceUnavailable, "auth_unavailable")
 		return
 	}
 	user, lookupErr := s.authUsers.LookupUser(r.Context(), req.UserID, req.TenantID)
 	if lookupErr != nil {
 		s.logger.Warn("notification user lookup failed", "user_id", req.UserID, "tenant_id", req.TenantID, "err", lookupErr)
-		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}
 	if user == nil || user.ID != req.UserID || !strings.EqualFold(strings.TrimSpace(user.TenantID), req.TenantID) {
-		writeError(w, nethttp.StatusNotFound, "not_found")
+		httpx.WriteError(w,nethttp.StatusNotFound, "not_found")
 		return
 	}
 	publicID, err := basestore.NewPublicID()
 	if err != nil {
 		s.logger.Error("generate notification id failed", "err", err)
-		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}
 	notification, err := s.inbox.CreateNotification(r.Context(), basestore.Notification{
@@ -234,7 +231,7 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 	})
 	if err != nil {
 		s.logger.Error("store social notification failed", "err", err)
-		writeError(w, nethttp.StatusBadGateway, "delivery_failed")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}
 	email := strings.TrimSpace(user.Email)
@@ -243,7 +240,7 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 			s.logger.Warn("enqueue social notification email failed", "user_id", req.UserID, "tenant_id", req.TenantID, "err", err)
 		}
 	}
-	writeJSON(w, nethttp.StatusAccepted, map[string]any{"status": "queued", "notification_id": notification.PublicID})
+	httpx.WriteJSON(w,nethttp.StatusAccepted, map[string]any{"status": "queued", "notification_id": notification.PublicID})
 }
 
 func normalizeEmailAddress(value string) (string, error) {
@@ -275,16 +272,16 @@ func isAllowedSocialKind(value string) bool {
 func (s *Server) authenticated(next func(nethttp.ResponseWriter, *nethttp.Request, viewer)) nethttp.Handler {
 	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		if s.authn == nil {
-			writeError(w, nethttp.StatusServiceUnavailable, "auth_unavailable")
+			httpx.WriteError(w,nethttp.StatusServiceUnavailable, "auth_unavailable")
 			return
 		}
 		v, err := s.authn.Required(r.Context(), r)
 		if err != nil {
 			if errors.Is(err, ErrUnauthorized) {
-				writeError(w, nethttp.StatusUnauthorized, "unauthorized")
+				httpx.WriteError(w,nethttp.StatusUnauthorized, "unauthorized")
 				return
 			}
-			writeError(w, nethttp.StatusBadGateway, "auth_unavailable")
+			httpx.WriteError(w,nethttp.StatusBadGateway, "auth_unavailable")
 			return
 		}
 		next(w, r, v)
@@ -296,7 +293,7 @@ func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Re
 	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed <= 0 || parsed > 100 {
-			writeError(w, nethttp.StatusBadRequest, "bad_request")
+			httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 			return
 		}
 		limit = parsed
@@ -305,7 +302,7 @@ func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Re
 	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 0 {
-			writeError(w, nethttp.StatusBadRequest, "bad_request")
+			httpx.WriteError(w,nethttp.StatusBadRequest, "bad_request")
 			return
 		}
 		offset = parsed
@@ -313,13 +310,13 @@ func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Re
 	notifications, total, err := s.inbox.ListNotifications(r.Context(), viewer.TenantID, viewer.UserID, limit, offset)
 	if err != nil {
 		s.logger.Error("list notifications failed", "err", err)
-		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "unavailable")
 		return
 	}
 	unreadCount, err := s.inbox.CountUnread(r.Context(), viewer.TenantID, viewer.UserID)
 	if err != nil {
 		s.logger.Error("count unread notifications failed", "err", err)
-		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "unavailable")
 		return
 	}
 	hasMore := offset+len(notifications) < total
@@ -328,7 +325,7 @@ func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Re
 		value := offset + len(notifications)
 		nextOffset = &value
 	}
-	writeJSON(w, nethttp.StatusOK, notificationListResponse{
+	httpx.WriteJSON(w,nethttp.StatusOK, notificationListResponse{
 		Notifications: presentNotifications(notifications),
 		Total:         total,
 		UnreadCount:   unreadCount,
@@ -343,30 +340,30 @@ func (s *Server) handleUnreadCount(w nethttp.ResponseWriter, r *nethttp.Request,
 	count, err := s.inbox.CountUnread(r.Context(), viewer.TenantID, viewer.UserID)
 	if err != nil {
 		s.logger.Error("count unread notifications failed", "err", err)
-		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "unavailable")
 		return
 	}
-	writeJSON(w, nethttp.StatusOK, map[string]int{"unread_count": count})
+	httpx.WriteJSON(w,nethttp.StatusOK, map[string]int{"unread_count": count})
 }
 
 func (s *Server) handleReadNotification(w nethttp.ResponseWriter, r *nethttp.Request, viewer viewer) {
 	notification, err := s.inbox.MarkNotificationRead(r.Context(), viewer.TenantID, viewer.UserID, strings.TrimSpace(r.PathValue("id")), time.Now().UTC())
 	if err != nil {
 		if errors.Is(err, basestore.ErrNotFound) {
-			writeError(w, nethttp.StatusNotFound, "not_found")
+			httpx.WriteError(w,nethttp.StatusNotFound, "not_found")
 			return
 		}
 		s.logger.Error("mark notification read failed", "err", err)
-		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "unavailable")
 		return
 	}
 	unreadCount, err := s.inbox.CountUnread(r.Context(), viewer.TenantID, viewer.UserID)
 	if err != nil {
 		s.logger.Error("count unread notifications failed", "err", err)
-		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "unavailable")
 		return
 	}
-	writeJSON(w, nethttp.StatusOK, map[string]any{
+	httpx.WriteJSON(w,nethttp.StatusOK, map[string]any{
 		"notification": presentNotification(notification),
 		"unread_count": unreadCount,
 	})
@@ -376,10 +373,10 @@ func (s *Server) handleReadAllNotifications(w nethttp.ResponseWriter, r *nethttp
 	updated, err := s.inbox.MarkAllNotificationsRead(r.Context(), viewer.TenantID, viewer.UserID, time.Now().UTC())
 	if err != nil {
 		s.logger.Error("mark all notifications read failed", "err", err)
-		writeError(w, nethttp.StatusBadGateway, "unavailable")
+		httpx.WriteError(w,nethttp.StatusBadGateway, "unavailable")
 		return
 	}
-	writeJSON(w, nethttp.StatusOK, map[string]int{
+	httpx.WriteJSON(w,nethttp.StatusOK, map[string]int{
 		"marked_read":  updated,
 		"unread_count": 0,
 	})
@@ -441,32 +438,3 @@ func kindGroup(kind string) string {
 	}
 }
 
-func decodeJSON(r *nethttp.Request, dst any) error {
-	payload, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
-	if err != nil {
-		return err
-	}
-	if int64(len(payload)) > maxBodyBytes {
-		return errors.New("too_large")
-	}
-	dec := json.NewDecoder(strings.NewReader(string(payload)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(dst); err != nil {
-		return err
-	}
-	if err := dec.Decode(new(struct{})); err != io.EOF {
-		return errors.New("trailing_data")
-	}
-	return nil
-}
-
-func writeJSON(w nethttp.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
-func writeError(w nethttp.ResponseWriter, status int, code string) {
-	writeJSON(w, status, map[string]string{"error": code})
-}

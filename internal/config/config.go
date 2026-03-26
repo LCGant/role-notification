@@ -4,8 +4,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"os"
-	"strconv"
 	"strings"
+
+	envconfig "github.com/LCGant/role-config"
 )
 
 type Config struct {
@@ -42,29 +43,29 @@ type MailConfig struct {
 
 func Load() (Config, error) {
 	cfg := Config{
-		HTTPAddr:          getenv("NOTIFICATION_HTTP_ADDR", ":8080"),
-		DBURL:             strings.TrimSpace(getenv("NOTIFICATION_DB_URL", getenv("DATABASE_URL", ""))),
+		HTTPAddr:          envconfig.EnvString("NOTIFICATION_HTTP_ADDR", ":8080"),
+		DBURL:             strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DB_URL", envconfig.EnvString("DATABASE_URL", ""))),
 		VerificationInternalToken:    strings.TrimSpace(os.Getenv("NOTIFICATION_EMAIL_VERIFICATION_INTERNAL_TOKEN")),
 		PasswordResetInternalToken:   strings.TrimSpace(os.Getenv("NOTIFICATION_PASSWORD_RESET_INTERNAL_TOKEN")),
 		SocialInternalToken:          strings.TrimSpace(os.Getenv("NOTIFICATION_SOCIAL_INTERNAL_TOKEN")),
 		MetricsToken:      strings.TrimSpace(os.Getenv("NOTIFICATION_METRICS_TOKEN")),
-		LogLevel:          getenv("NOTIFICATION_LOG_LEVEL", "info"),
-		Env:               getenv("NOTIFICATION_ENV", "development"),
-		QueueDir:          strings.TrimSpace(getenv("NOTIFICATION_QUEUE_DIR", "/tmp/notification-queue")),
-		AuthBaseURL:       strings.TrimSpace(getenv("NOTIFICATION_AUTH_BASE_URL", "")),
-		AuthIntrospectionInternalToken: strings.TrimSpace(getenv("NOTIFICATION_AUTH_INTROSPECTION_INTERNAL_TOKEN", "")),
-		AuthUserLookupInternalToken:    strings.TrimSpace(getenv("NOTIFICATION_AUTH_USER_LOOKUP_INTERNAL_TOKEN", "")),
-		SessionCookie:     strings.TrimSpace(getenv("NOTIFICATION_SESSION_COOKIE", "session_id")),
-		DeviceCookie:      strings.TrimSpace(getenv("NOTIFICATION_DEVICE_COOKIE", "device_id")),
-		AllowInsecureHTTP: envBool("NOTIFICATION_AUTH_ALLOW_INSECURE_HTTP", false),
+		LogLevel:          envconfig.EnvString("NOTIFICATION_LOG_LEVEL", "info"),
+		Env:               envconfig.EnvString("NOTIFICATION_ENV", "development"),
+		QueueDir:          strings.TrimSpace(envconfig.EnvString("NOTIFICATION_QUEUE_DIR", "/tmp/notification-queue")),
+		AuthBaseURL:       strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_BASE_URL", "")),
+		AuthIntrospectionInternalToken: strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_INTROSPECTION_INTERNAL_TOKEN", "")),
+		AuthUserLookupInternalToken:    strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_USER_LOOKUP_INTERNAL_TOKEN", "")),
+		SessionCookie:     strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SESSION_COOKIE", "session_id")),
+		DeviceCookie:      strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DEVICE_COOKIE", "device_id")),
+		AllowInsecureHTTP: envconfig.EnvBool("NOTIFICATION_AUTH_ALLOW_INSECURE_HTTP", false),
 		Mail: MailConfig{
 			OutboxDir:                    strings.TrimSpace(os.Getenv("EMAIL_OUTBOX_DIR")),
 			SMTPHost:                     strings.TrimSpace(os.Getenv("SMTP_HOST")),
-			SMTPPort:                     envInt("SMTP_PORT", 587),
+			SMTPPort:                     envconfig.EnvInt("SMTP_PORT", 587),
 			SMTPUsername:                 strings.TrimSpace(os.Getenv("SMTP_USERNAME")),
 			SMTPPassword:                 strings.TrimSpace(os.Getenv("SMTP_PASSWORD")),
 			SMTPFrom:                     strings.TrimSpace(os.Getenv("SMTP_FROM")),
-			SMTPRequireTLS:               envBool("SMTP_REQUIRE_TLS", true),
+			SMTPRequireTLS:               envconfig.EnvBool("SMTP_REQUIRE_TLS", true),
 			EmailVerificationURLTemplate: os.Getenv("EMAIL_VERIFICATION_URL_TEMPLATE"),
 			PasswordResetURLTemplate:     os.Getenv("PASSWORD_RESET_URL_TEMPLATE"),
 		},
@@ -120,31 +121,4 @@ func Load() (Config, error) {
 		return Config{}, errors.New("NOTIFICATION_AUTH_BASE_URL is required when NOTIFICATION_AUTH_USER_LOOKUP_INTERNAL_TOKEN is set")
 	}
 	return cfg, nil
-}
-
-func getenv(key, fallback string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
-	}
-	return fallback
-}
-
-func envBool(key string, fallback bool) bool {
-	if value := os.Getenv(key); value != "" {
-		parsed, err := strconv.ParseBool(value)
-		if err == nil {
-			return parsed
-		}
-	}
-	return fallback
-}
-
-func envInt(key string, fallback int) int {
-	if value := os.Getenv(key); value != "" {
-		parsed, err := strconv.Atoi(value)
-		if err == nil {
-			return parsed
-		}
-	}
-	return fallback
 }

@@ -7,11 +7,12 @@ import (
 	"strconv"
 	"strings"
 
+	apperrors "github.com/LCGant/role-errors"
 	"github.com/LCGant/role-notification/internal/config"
 	"github.com/LCGant/role-pep/pep"
 )
 
-var ErrUnauthorized = errors.New("unauthorized")
+var ErrUnauthorized = apperrors.ErrUnauthorized
 
 type viewer struct {
 	UserID   int64
