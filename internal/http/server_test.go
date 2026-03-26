@@ -101,6 +101,41 @@ func TestSocialNotificationWritesOutbox(t *testing.T) {
 	waitForOutboxToken(t, dir, "Alice started following you.")
 }
 
+func TestSocialNotificationSanitizesHTMLBeforePersisting(t *testing.T) {
+	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", SocialInternalToken: "social-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{9}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
+	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	inbox := memory.New()
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"user":{"id":42,"tenant_id":"default","email":"u@example.com"}}`))
+	}))
+	defer authSrv.Close()
+	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, inbox, nil, authclient.New(authSrv.URL, "lookup-secret"))
+
+	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"<b>New follower</b>","body":"<script>alert(1)</script>Hello"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "social-secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d body=%s", rr.Code, rr.Body.String())
+	}
+
+	items, _, err := inbox.ListNotifications(context.Background(), "default", 42, 10, 0)
+	if err != nil {
+		t.Fatalf("list notifications: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("expected 1 notification, got %d", len(items))
+	}
+	if items[0].Subject != "&lt;b&gt;New follower&lt;/b&gt;" {
+		t.Fatalf("unexpected sanitized subject: %q", items[0].Subject)
+	}
+	if items[0].Body != "&lt;script&gt;alert(1)&lt;/script&gt;Hello" {
+		t.Fatalf("unexpected sanitized body: %q", items[0].Body)
+	}
+}
+
 type stubAuthn struct {
 	viewer viewer
 	err    error
