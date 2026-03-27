@@ -70,8 +70,9 @@ func (s *smtpSender) send(ctx context.Context, to, subject, body string) error {
 
 	if ok, _ := client.Extension("STARTTLS"); ok {
 		tlsCfg := &tls.Config{
-			ServerName: s.cfg.SMTPHost,
-			MinVersion: tls.VersionTLS12,
+			ServerName:         s.cfg.SMTPHost,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: false,
 		}
 		if err := client.StartTLS(tlsCfg); err != nil {
 			return err

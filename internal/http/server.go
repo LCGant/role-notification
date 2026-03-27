@@ -249,18 +249,19 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
-	callerTenantID := strings.TrimSpace(r.Header.Get("X-Caller-Tenant-Id"))
-	if claims, ok := r.Context().Value(internalSocialClaimsKey{}).(internalSocialClaims); ok {
-		callerTenantID = claims.TenantID
+	claims, ok := r.Context().Value(internalSocialClaimsKey{}).(internalSocialClaims)
+	if !ok || strings.TrimSpace(claims.TenantID) == "" {
+		httpx.WriteError(w, nethttp.StatusUnauthorized, "unauthorized")
+		return
 	}
+	callerTenantID := strings.TrimSpace(claims.TenantID)
 	req.TenantID = strings.TrimSpace(req.TenantID)
 	req.To = strings.TrimSpace(req.To)
 	req.Kind = strings.TrimSpace(strings.ToLower(req.Kind))
 	req.Subject = sanitizeNotificationText(req.Subject)
 	req.Body = sanitizeNotificationText(req.Body)
-	// The JWT claim is the canonical tenant authority. We still reject mismatched
-	// body values to keep request debugging straightforward and fail closed on
-	// stale payloads.
+	// The signed JWT claim is the canonical tenant authority. We reject any
+	// mismatched body value to fail closed on stale or tampered payloads.
 	if callerTenantID == "" || (req.TenantID != "" && !strings.EqualFold(req.TenantID, callerTenantID)) {
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
 		return

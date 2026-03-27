@@ -16,7 +16,6 @@ type Config struct {
 	DBURL                          string
 	VerificationInternalToken      string
 	PasswordResetInternalToken     string
-	SocialInternalToken            string
 	MetricsToken                   string
 	LogLevel                       string
 	Env                            string
@@ -30,7 +29,6 @@ type Config struct {
 	ServiceTokenIssuer             string
 	ServiceTokenAudience           string
 	ServiceTokenPublicKeys         map[string]ed25519.PublicKey
-	AllowLegacySocialToken         bool
 	Mail                           MailConfig
 }
 
@@ -52,7 +50,6 @@ func Load() (Config, error) {
 		DBURL:                          strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DB_URL", envconfig.EnvString("DATABASE_URL", ""))),
 		VerificationInternalToken:      strings.TrimSpace(os.Getenv("NOTIFICATION_EMAIL_VERIFICATION_INTERNAL_TOKEN")),
 		PasswordResetInternalToken:     strings.TrimSpace(os.Getenv("NOTIFICATION_PASSWORD_RESET_INTERNAL_TOKEN")),
-		SocialInternalToken:            strings.TrimSpace(os.Getenv("NOTIFICATION_SOCIAL_INTERNAL_TOKEN")),
 		MetricsToken:                   strings.TrimSpace(os.Getenv("NOTIFICATION_METRICS_TOKEN")),
 		LogLevel:                       envconfig.EnvString("NOTIFICATION_LOG_LEVEL", "info"),
 		Env:                            envconfig.EnvString("NOTIFICATION_ENV", "development"),
@@ -64,7 +61,6 @@ func Load() (Config, error) {
 		AllowInsecureHTTP:              envconfig.EnvBool("NOTIFICATION_AUTH_ALLOW_INSECURE_HTTP", false),
 		ServiceTokenIssuer:             strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SERVICE_TOKEN_ISSUER", "auth-internal")),
 		ServiceTokenAudience:           strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SERVICE_TOKEN_AUDIENCE", "notification")),
-		AllowLegacySocialToken:         envconfig.EnvBool("NOTIFICATION_ALLOW_LEGACY_SOCIAL_INTERNAL_TOKEN", false),
 		Mail: MailConfig{
 			OutboxDir:                    strings.TrimSpace(os.Getenv("EMAIL_OUTBOX_DIR")),
 			SMTPHost:                     strings.TrimSpace(os.Getenv("SMTP_HOST")),
