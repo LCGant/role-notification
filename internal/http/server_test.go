@@ -3,6 +3,7 @@ package http
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	internaltoken "github.com/LCGant/role-internaltoken"
 	"github.com/LCGant/role-notification/internal/authclient"
 	"github.com/LCGant/role-notification/internal/config"
 	"github.com/LCGant/role-notification/internal/delivery"
@@ -72,7 +74,7 @@ func TestInternalVerificationRejectsTrailingJSONData(t *testing.T) {
 
 func TestSocialNotificationWritesOutbox(t *testing.T) {
 	dir := t.TempDir()
-	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", SocialInternalToken: "social-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{4}, 32), Mail: config.MailConfig{OutboxDir: dir}}
+	cfg, signer := socialTokenConfig(t, bytes.Repeat([]byte{4}, 32), dir)
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -92,8 +94,7 @@ func TestSocialNotificationWritesOutbox(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"New follower","body":"Alice started following you."}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", "social-secret")
-	req.Header.Set("X-Caller-Tenant-Id", "default")
+	req.Header.Set("Authorization", "Bearer "+issueSocialToken(t, signer, "default"))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusAccepted {
@@ -103,7 +104,7 @@ func TestSocialNotificationWritesOutbox(t *testing.T) {
 }
 
 func TestSocialNotificationSanitizesHTMLBeforePersisting(t *testing.T) {
-	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", SocialInternalToken: "social-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{9}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
+	cfg, signer := socialTokenConfig(t, bytes.Repeat([]byte{9}, 32), t.TempDir())
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	inbox := memory.New()
 	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -115,8 +116,7 @@ func TestSocialNotificationSanitizesHTMLBeforePersisting(t *testing.T) {
 
 	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"<b>New follower</b>","body":"<script>alert(1)</script>Hello"}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", "social-secret")
-	req.Header.Set("X-Caller-Tenant-Id", "default")
+	req.Header.Set("Authorization", "Bearer "+issueSocialToken(t, signer, "default"))
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusAccepted {
@@ -138,8 +138,8 @@ func TestSocialNotificationSanitizesHTMLBeforePersisting(t *testing.T) {
 	}
 }
 
-func TestSocialNotificationRejectsMissingOrMismatchedCallerTenant(t *testing.T) {
-	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", SocialInternalToken: "social-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{9}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
+func TestSocialNotificationRejectsMissingAuthOrTenantMismatch(t *testing.T) {
+	cfg, signer := socialTokenConfig(t, bytes.Repeat([]byte{9}, 32), t.TempDir())
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	inbox := memory.New()
 	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -151,21 +151,19 @@ func TestSocialNotificationRejectsMissingOrMismatchedCallerTenant(t *testing.T) 
 
 	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"New follower","body":"Alice started following you."}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", "social-secret")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 without caller tenant header, got %d", rr.Code)
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401 without internal auth, got %d", rr.Code)
 	}
 
 	req = httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"New follower","body":"Alice started following you."}`))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", "social-secret")
-	req.Header.Set("X-Caller-Tenant-Id", "tenant-99")
+	req.Header.Set("Authorization", "Bearer "+issueSocialToken(t, signer, "tenant-99"))
 	rr = httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected 400 for mismatched caller tenant, got %d", rr.Code)
+		t.Fatalf("expected 400 for tenant mismatch, got %d", rr.Code)
 	}
 }
 
@@ -311,4 +309,35 @@ func waitForOutboxToken(t *testing.T, dir, token string) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatalf("expected token %q in outbox %s", token, dir)
+}
+
+func socialTokenConfig(t *testing.T, queueKey []byte, outboxDir string) (config.Config, *internaltoken.Signer) {
+	t.Helper()
+	seed := bytes.Repeat([]byte{7}, ed25519.SeedSize)
+	signer, err := internaltoken.NewSigner("auth-internal", "auth-internal-default", seed)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	return config.Config{
+		VerificationInternalToken:  "verify-secret",
+		PasswordResetInternalToken: "reset-secret",
+		MetricsToken:               "metrics",
+		QueueDir:                   t.TempDir(),
+		QueueKey:                   queueKey,
+		ServiceTokenIssuer:         "auth-internal",
+		ServiceTokenAudience:       "notification",
+		ServiceTokenPublicKeys: map[string]ed25519.PublicKey{
+			"auth-internal-default": ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey),
+		},
+		Mail: config.MailConfig{OutboxDir: outboxDir},
+	}, signer
+}
+
+func issueSocialToken(t *testing.T, signer *internaltoken.Signer, tenantID string) string {
+	t.Helper()
+	token, _, err := signer.Mint("social", "notification", "notifications:social:write", tenantID, time.Minute)
+	if err != nil {
+		t.Fatalf("mint social token: %v", err)
+	}
+	return token
 }

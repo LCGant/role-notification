@@ -1,12 +1,14 @@
 package config
 
 import (
+	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
 	"os"
 	"strings"
 
 	envconfig "github.com/LCGant/role-config"
+	internaltoken "github.com/LCGant/role-internaltoken"
 )
 
 type Config struct {
@@ -26,6 +28,10 @@ type Config struct {
 	SessionCookie                  string
 	DeviceCookie                   string
 	AllowInsecureHTTP              bool
+	ServiceTokenIssuer             string
+	ServiceTokenAudience           string
+	ServiceTokenPublicKeys         map[string]ed25519.PublicKey
+	AllowLegacySocialToken         bool
 	Mail                           MailConfig
 }
 
@@ -58,6 +64,9 @@ func Load() (Config, error) {
 		SessionCookie:                  strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SESSION_COOKIE", "session_id")),
 		DeviceCookie:                   strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DEVICE_COOKIE", "device_id")),
 		AllowInsecureHTTP:              envconfig.EnvBool("NOTIFICATION_AUTH_ALLOW_INSECURE_HTTP", false),
+		ServiceTokenIssuer:             strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SERVICE_TOKEN_ISSUER", "auth-internal")),
+		ServiceTokenAudience:           strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SERVICE_TOKEN_AUDIENCE", "notification")),
+		AllowLegacySocialToken:         envconfig.EnvBool("NOTIFICATION_ALLOW_LEGACY_SOCIAL_INTERNAL_TOKEN", false),
 		Mail: MailConfig{
 			OutboxDir:                    strings.TrimSpace(os.Getenv("EMAIL_OUTBOX_DIR")),
 			SMTPHost:                     strings.TrimSpace(os.Getenv("SMTP_HOST")),
@@ -75,9 +84,6 @@ func Load() (Config, error) {
 	}
 	if cfg.PasswordResetInternalToken == "" {
 		return Config{}, errors.New("NOTIFICATION_PASSWORD_RESET_INTERNAL_TOKEN is required")
-	}
-	if cfg.SocialInternalToken == "" {
-		return Config{}, errors.New("NOTIFICATION_SOCIAL_INTERNAL_TOKEN is required")
 	}
 	if cfg.QueueDir == "" {
 		return Config{}, errors.New("NOTIFICATION_QUEUE_DIR is required")
@@ -119,6 +125,21 @@ func Load() (Config, error) {
 	}
 	if cfg.AuthBaseURL == "" && cfg.AuthUserLookupInternalToken != "" {
 		return Config{}, errors.New("NOTIFICATION_AUTH_BASE_URL is required when NOTIFICATION_AUTH_USER_LOOKUP_INTERNAL_TOKEN is set")
+	}
+	if rawKeys := strings.TrimSpace(os.Getenv("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS")); rawKeys != "" {
+		keys, err := internaltoken.ParsePublicKeySet(rawKeys)
+		if err != nil {
+			return Config{}, errors.New("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS is invalid")
+		}
+		cfg.ServiceTokenPublicKeys = keys
+	}
+	if len(cfg.ServiceTokenPublicKeys) == 0 && cfg.SocialInternalToken == "" {
+		return Config{}, errors.New("configure NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS or NOTIFICATION_SOCIAL_INTERNAL_TOKEN")
+	}
+	if len(cfg.ServiceTokenPublicKeys) > 0 {
+		if cfg.ServiceTokenIssuer == "" || cfg.ServiceTokenAudience == "" {
+			return Config{}, errors.New("NOTIFICATION_SERVICE_TOKEN_ISSUER and NOTIFICATION_SERVICE_TOKEN_AUDIENCE are required when NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS is set")
+		}
 	}
 	return cfg, nil
 }

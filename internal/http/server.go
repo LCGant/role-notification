@@ -1,6 +1,7 @@
 package http
 
 import (
+	"context"
 	"errors"
 	"expvar"
 	"html"
@@ -14,6 +15,7 @@ import (
 
 	libcrypto "github.com/LCGant/role-crypto"
 	"github.com/LCGant/role-httpx"
+	internaltoken "github.com/LCGant/role-internaltoken"
 	"github.com/LCGant/role-notification/internal/authclient"
 	"github.com/LCGant/role-notification/internal/config"
 	"github.com/LCGant/role-notification/internal/delivery"
@@ -22,13 +24,14 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	logger    *slog.Logger
-	deliverer *delivery.Service
-	inbox     basestore.InboxStore
-	authn     Authenticator
-	authUsers *authclient.Client
-	mux       *nethttp.ServeMux
+	cfg        config.Config
+	logger     *slog.Logger
+	deliverer  *delivery.Service
+	inbox      basestore.InboxStore
+	authn      Authenticator
+	authUsers  *authclient.Client
+	mux        *nethttp.ServeMux
+	serviceJWT *internaltoken.Verifier
 }
 
 type deliveryRequest struct {
@@ -67,6 +70,14 @@ type notificationListResponse struct {
 	NextOffset    *int                   `json:"next_offset,omitempty"`
 }
 
+type internalSocialClaims struct {
+	Subject  string
+	Scope    string
+	TenantID string
+}
+
+type internalSocialClaimsKey struct{}
+
 func New(cfg config.Config, logger *slog.Logger, svc *delivery.Service, inbox basestore.InboxStore) nethttp.Handler {
 	authn, err := newAuthenticator(cfg)
 	if err != nil {
@@ -88,6 +99,13 @@ func NewWithDependencies(cfg config.Config, logger *slog.Logger, svc *delivery.S
 		authUsers: users,
 		mux:       nethttp.NewServeMux(),
 	}
+	if len(cfg.ServiceTokenPublicKeys) > 0 {
+		verifier, err := internaltoken.NewVerifier(cfg.ServiceTokenIssuer, cfg.ServiceTokenPublicKeys, 15*time.Second)
+		if err != nil {
+			panic(err)
+		}
+		s.serviceJWT = verifier
+	}
 	s.routes()
 	return s
 }
@@ -100,7 +118,7 @@ func (s *Server) routes() {
 	s.mux.Handle("/metrics", s.metricsGuard(expvar.Handler()))
 	s.mux.Handle("POST /internal/email-verification", s.internalWithToken(s.cfg.VerificationInternalToken, s.handleVerification))
 	s.mux.Handle("POST /internal/password-reset", s.internalWithToken(s.cfg.PasswordResetInternalToken, s.handlePasswordReset))
-	s.mux.Handle("POST /internal/social", s.internalWithToken(s.cfg.SocialInternalToken, s.handleSocial))
+	s.mux.Handle("POST /internal/social", s.internalSocialAuth(s.handleSocial))
 	s.mux.Handle("GET /{$}", s.authenticated(s.handleListNotifications))
 	s.mux.Handle("GET /unread-count", s.authenticated(s.handleUnreadCount))
 	s.mux.Handle("POST /read-all", s.authenticated(s.handleReadAllNotifications))
@@ -133,6 +151,52 @@ func (s *Server) metricsGuard(next nethttp.Handler) nethttp.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func (s *Server) internalSocialAuth(next nethttp.HandlerFunc) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		authz := strings.TrimSpace(r.Header.Get("Authorization"))
+		if strings.HasPrefix(authz, "Bearer ") {
+			claims, ok := s.verifySocialBearerToken(w, r)
+			if !ok {
+				return
+			}
+			ctx := context.WithValue(r.Context(), internalSocialClaimsKey{}, claims)
+			next(w, r.WithContext(ctx))
+			return
+		}
+		if s.cfg.AllowLegacySocialToken && s.cfg.SocialInternalToken != "" && libcrypto.ConstantTimeEqual(strings.TrimSpace(r.Header.Get("X-Internal-Token")), s.cfg.SocialInternalToken) {
+			next(w, r)
+			return
+		}
+		httpx.WriteError(w, nethttp.StatusUnauthorized, "unauthorized")
+	})
+}
+
+func (s *Server) verifySocialBearerToken(w nethttp.ResponseWriter, r *nethttp.Request) (internalSocialClaims, bool) {
+	authz := strings.TrimSpace(r.Header.Get("Authorization"))
+	if !strings.HasPrefix(authz, "Bearer ") {
+		return internalSocialClaims{}, false
+	}
+	if s.serviceJWT == nil {
+		httpx.WriteError(w, nethttp.StatusServiceUnavailable, "auth_unavailable")
+		return internalSocialClaims{}, false
+	}
+	token := strings.TrimSpace(strings.TrimPrefix(authz, "Bearer "))
+	claims, err := s.serviceJWT.Verify(token, s.cfg.ServiceTokenAudience)
+	if err != nil {
+		httpx.WriteError(w, nethttp.StatusUnauthorized, "unauthorized")
+		return internalSocialClaims{}, false
+	}
+	if claims.Subject != "social" || claims.Scope != "notifications:social:write" {
+		httpx.WriteError(w, nethttp.StatusForbidden, "forbidden")
+		return internalSocialClaims{}, false
+	}
+	return internalSocialClaims{
+		Subject:  claims.Subject,
+		Scope:    claims.Scope,
+		TenantID: claims.TenantID,
+	}, true
 }
 
 func (s *Server) handleVerification(w nethttp.ResponseWriter, r *nethttp.Request) {
@@ -190,15 +254,17 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 		return
 	}
 	callerTenantID := strings.TrimSpace(r.Header.Get("X-Caller-Tenant-Id"))
+	if claims, ok := r.Context().Value(internalSocialClaimsKey{}).(internalSocialClaims); ok {
+		callerTenantID = claims.TenantID
+	}
 	req.TenantID = strings.TrimSpace(req.TenantID)
 	req.To = strings.TrimSpace(req.To)
 	req.Kind = strings.TrimSpace(strings.ToLower(req.Kind))
 	req.Subject = sanitizeNotificationText(req.Subject)
 	req.Body = sanitizeNotificationText(req.Body)
-	// Social notifications must carry tenant context in a caller-controlled
-	// transport header. Rejecting missing or mismatched tenant values makes the
-	// trust boundary explicit and prevents accidental cross-tenant writes from a
-	// stale request body.
+	// The JWT claim is the canonical tenant authority. We still reject mismatched
+	// body values to keep request debugging straightforward and fail closed on
+	// stale payloads.
 	if callerTenantID == "" || (req.TenantID != "" && !strings.EqualFold(req.TenantID, callerTenantID)) {
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
 		return

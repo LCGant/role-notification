@@ -30,6 +30,7 @@ jobs:
           go mod edit -replace github.com/LCGant/role-crypto="$GITHUB_WORKSPACE/role-root/libs/crypto"
           go mod edit -replace github.com/LCGant/role-errors="$GITHUB_WORKSPACE/role-root/libs/errors"
           go mod edit -replace github.com/LCGant/role-httpx="$GITHUB_WORKSPACE/role-root/libs/httpx"
+          go mod edit -replace github.com/LCGant/role-internaltoken="$GITHUB_WORKSPACE/role-root/libs/internaltoken"
       - name: Download deps
         run: go mod download
       - name: Verify formatting
