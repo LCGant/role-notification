@@ -2,6 +2,8 @@ package http
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"expvar"
 	"html"
@@ -21,17 +23,19 @@ import (
 	"github.com/LCGant/role-notification/internal/delivery"
 	basestore "github.com/LCGant/role-notification/internal/store"
 	"github.com/LCGant/role-notification/internal/store/memory"
+	ratelimit "github.com/LCGant/role-ratelimit"
 )
 
 type Server struct {
-	cfg        config.Config
-	logger     *slog.Logger
-	deliverer  *delivery.Service
-	inbox      basestore.InboxStore
-	authn      Authenticator
-	authUsers  *authclient.Client
-	mux        *nethttp.ServeMux
-	serviceJWT *internaltoken.Verifier
+	cfg         config.Config
+	logger      *slog.Logger
+	deliverer   *delivery.Service
+	inbox       basestore.InboxStore
+	authn       Authenticator
+	authUsers   *authclient.Client
+	mux         *nethttp.ServeMux
+	serviceJWT  *internaltoken.Verifier
+	mailLimiter ratelimit.Limiter
 }
 
 type deliveryRequest struct {
@@ -98,6 +102,10 @@ func NewWithDependencies(cfg config.Config, logger *slog.Logger, svc *delivery.S
 		authn:     authn,
 		authUsers: users,
 		mux:       nethttp.NewServeMux(),
+		mailLimiter: ratelimit.Counter(ratelimit.CounterConfig{
+			Requests: 5,
+			Window:   time.Hour,
+		}),
 	}
 	if len(cfg.ServiceTokenPublicKeys) > 0 {
 		var verifierOpts []internaltoken.VerifierOption
@@ -215,11 +223,16 @@ func (s *Server) handleVerification(w nethttp.ResponseWriter, r *nethttp.Request
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
-	if _, err := normalizeEmailAddress(req.To); err != nil {
+	normalizedTo, err := normalizeEmailAddress(req.To)
+	if err != nil {
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
-	if err := s.deliverer.EnqueueVerification(r.Context(), req.To, req.Token); err != nil {
+	if s.mailLimiter != nil && !s.mailLimiter.Allow(internalMailRateLimitKey("verify", normalizedTo, strings.TrimSpace(r.Header.Get("X-Internal-Token")))) {
+		httpx.WriteError(w, nethttp.StatusTooManyRequests, "rate_limit_exceeded")
+		return
+	}
+	if err := s.deliverer.EnqueueVerification(r.Context(), normalizedTo, req.Token); err != nil {
 		s.logger.Error("enqueue verification failed", "err", err)
 		httpx.WriteError(w, nethttp.StatusBadGateway, "delivery_failed")
 		return
@@ -239,11 +252,16 @@ func (s *Server) handlePasswordReset(w nethttp.ResponseWriter, r *nethttp.Reques
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
-	if _, err := normalizeEmailAddress(req.To); err != nil {
+	normalizedTo, err := normalizeEmailAddress(req.To)
+	if err != nil {
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
-	if err := s.deliverer.EnqueuePasswordReset(r.Context(), req.To, req.Token); err != nil {
+	if s.mailLimiter != nil && !s.mailLimiter.Allow(internalMailRateLimitKey("reset", normalizedTo, strings.TrimSpace(r.Header.Get("X-Internal-Token")))) {
+		httpx.WriteError(w, nethttp.StatusTooManyRequests, "rate_limit_exceeded")
+		return
+	}
+	if err := s.deliverer.EnqueuePasswordReset(r.Context(), normalizedTo, req.Token); err != nil {
 		s.logger.Error("enqueue password reset failed", "err", err)
 		httpx.WriteError(w, nethttp.StatusBadGateway, "delivery_failed")
 		return
@@ -337,6 +355,15 @@ func normalizeEmailAddress(value string) (string, error) {
 		return "", errors.New("invalid email")
 	}
 	return strings.TrimSpace(addr.Address), nil
+}
+
+func internalMailRateLimitKey(kind, email, callerToken string) string {
+	hashInput := strings.TrimSpace(callerToken)
+	if hashInput == "" {
+		hashInput = "anonymous"
+	}
+	sum := sha256.Sum256([]byte(hashInput))
+	return kind + "|email:" + strings.ToLower(strings.TrimSpace(email)) + "|caller:" + hex.EncodeToString(sum[:8])
 }
 
 func validHeaderValue(value string) bool {

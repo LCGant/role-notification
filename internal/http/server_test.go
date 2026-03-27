@@ -74,6 +74,32 @@ func TestInternalVerificationRejectsTrailingJSONData(t *testing.T) {
 	}
 }
 
+func TestInternalVerificationRateLimitsByRecipientAndCaller(t *testing.T) {
+	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{3}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
+	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	h := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New())
+
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest("POST", "/internal/email-verification", bytes.NewBufferString(`{"to":"u@example.com","token":"abc"}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Internal-Token", "verify-secret")
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusAccepted {
+			t.Fatalf("expected request %d to pass, got %d", i+1, rr.Code)
+		}
+	}
+
+	req := httptest.NewRequest("POST", "/internal/email-verification", bytes.NewBufferString(`{"to":"u@example.com","token":"abc"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "verify-secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusTooManyRequests {
+		t.Fatalf("expected rate limit on 6th request, got %d", rr.Code)
+	}
+}
+
 func TestSocialNotificationWritesOutbox(t *testing.T) {
 	dir := t.TempDir()
 	cfg, signer := socialTokenConfig(t, bytes.Repeat([]byte{4}, 32), dir)

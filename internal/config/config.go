@@ -4,6 +4,9 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 
@@ -136,6 +139,9 @@ func Load() (Config, error) {
 	if cfg.AuthBaseURL == "" && cfg.AuthServiceTokenMintToken != "" {
 		return Config{}, errors.New("NOTIFICATION_AUTH_BASE_URL is required when NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN is set")
 	}
+	if err := validateRemoteURL(cfg.AuthBaseURL, cfg.AllowInsecureHTTP); err != nil {
+		return Config{}, fmt.Errorf("invalid NOTIFICATION_AUTH_BASE_URL: %w", err)
+	}
 	if rawKeys := strings.TrimSpace(os.Getenv("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS")); rawKeys != "" {
 		keys, err := internaltoken.ParsePublicKeySet(rawKeys)
 		if err != nil {
@@ -152,6 +158,37 @@ func Load() (Config, error) {
 		}
 	}
 	return cfg, nil
+}
+
+func validateRemoteURL(raw string, allowInsecure bool) error {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		if allowInsecure || isLoopbackHost(u.Hostname()) {
+			return nil
+		}
+		return errors.New("remote http requires explicit NOTIFICATION_AUTH_ALLOW_INSECURE_HTTP opt-in")
+	default:
+		return errors.New("unsupported notification auth url scheme")
+	}
+}
+
+func isLoopbackHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func parseQueueKeys(raw string) (map[string][]byte, error) {
