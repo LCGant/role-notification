@@ -197,22 +197,28 @@ func normalizeAddress(value string) (string, error) {
 
 func verificationBody(cfg config.MailConfig, token string) string {
 	token = strings.TrimSpace(token)
-	if strings.TrimSpace(cfg.EmailVerificationURLTemplate) != "" {
-		return strings.ReplaceAll(cfg.EmailVerificationURLTemplate, "{{token}}", token)
+	if link := strings.TrimSpace(strings.ReplaceAll(cfg.EmailVerificationURLTemplate, "{{token}}", token)); link != "" {
+		return fmt.Sprintf(
+			"Welcome!\n\nConfirm your email by opening the link below:\n\n%s\n\nIf you did not request this, you can safely ignore this message.\n",
+			link,
+		)
 	}
 	return fmt.Sprintf(
-		"Use this verification token to activate your account:\n\n%s\n\nSubmit it to POST /email/verify/confirm or your frontend verification screen.\n",
+		"Welcome!\n\nUse the verification code below to activate your account.\n\nOpen your verification screen or submit it to POST /email/verify/confirm.\n\n%s\n",
 		token,
 	)
 }
 
 func passwordResetBody(cfg config.MailConfig, token string) string {
 	token = strings.TrimSpace(token)
-	if strings.TrimSpace(cfg.PasswordResetURLTemplate) != "" {
-		return strings.ReplaceAll(cfg.PasswordResetURLTemplate, "{{token}}", token)
+	if link := strings.TrimSpace(strings.ReplaceAll(cfg.PasswordResetURLTemplate, "{{token}}", token)); link != "" {
+		return fmt.Sprintf(
+			"We received a request to reset your password.\n\nOpen the link below to continue:\n\n%s\n\nIf this was not you, you can ignore this message.\n",
+			link,
+		)
 	}
 	return fmt.Sprintf(
-		"Use this password reset token to change your password:\n\n%s\n\nSubmit it to POST /password/reset or your frontend reset screen.\n",
+		"We received a request to reset your password.\n\nOpen your reset screen or submit it to POST /password/reset with the code below.\n\n%s\n",
 		token,
 	)
 }
