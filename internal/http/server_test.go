@@ -59,6 +59,54 @@ func TestVerificationWritesOutbox(t *testing.T) {
 	waitForOutboxToken(t, dir, "abc")
 }
 
+func TestVerificationAuditsQueuedDelivery(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Config{
+		VerificationInternalToken:  "verify-secret",
+		PasswordResetInternalToken: "reset-secret",
+		MetricsToken:               "metrics",
+		QueueDir:                   t.TempDir(),
+		QueueKey:                   bytes.Repeat([]byte{2}, 32),
+		AuthBaseURL:                "",
+		AuthServiceTokenMintToken:  "",
+		Mail:                       config.MailConfig{OutboxDir: dir},
+	}
+	authSrv, auditRequests := newNotificationSupportServers(t)
+	defer authSrv.Close()
+	cfg.AuthBaseURL = authSrv.URL
+	cfg.AuthServiceTokenMintToken = "notification-mint-secret"
+	cfg.AuditBaseURL = auditRequests.URL
+	cfg.AuditTimeout = time.Second
+
+	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go queue.Run(ctx)
+	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New(), nil, authclient.New(authSrv.URL, "notification-mint-secret"))
+
+	req := httptest.NewRequest("POST", "/internal/email-verification", bytes.NewBufferString(`{"to":"u@example.com","token":"abc"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "verify-secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected 202, got %d", rr.Code)
+	}
+	waitForOutboxToken(t, dir, "abc")
+
+	select {
+	case payload := <-auditRequests.Events:
+		if payload.Source != "notification" || payload.EventType != "notification:verify:sent" {
+			t.Fatalf("unexpected audit event: %+v", payload)
+		}
+		if payload.Metadata["email_hash"] == "" {
+			t.Fatalf("expected email hash in metadata")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected audit event")
+	}
+}
+
 func TestInternalVerificationRejectsTrailingJSONData(t *testing.T) {
 	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{3}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -373,10 +421,19 @@ func newAuthLookupServer(t *testing.T, tenantID string, userID int64, email stri
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode mint request: %v", err)
 			}
-			if req.Audience != "auth" || (req.Scope != "auth:users:read" && req.Scope != "auth:sessions:introspect") || req.TenantID != "" {
+			if req.TenantID != "" {
 				t.Fatalf("unexpected mint request: %+v", req)
 			}
-			token, claims, err := signer.Mint("notification", "auth", req.Scope, "", time.Minute)
+			var token string
+			var claims internaltoken.Claims
+			switch {
+			case req.Audience == "auth" && (req.Scope == "auth:users:read" || req.Scope == "auth:sessions:introspect"):
+				token, claims, err = signer.Mint("notification", "auth", req.Scope, "", time.Minute)
+			case req.Audience == "audit" && req.Scope == "audit:events:write":
+				token, claims, err = signer.Mint("notification", "audit", req.Scope, "", time.Minute)
+			default:
+				t.Fatalf("unexpected mint request: %+v", req)
+			}
 			if err != nil {
 				t.Fatalf("mint auth token: %v", err)
 			}
@@ -404,6 +461,58 @@ func newAuthLookupServer(t *testing.T, tenantID string, userID int64, email stri
 			t.Fatalf("unexpected auth request %s %s", r.Method, r.URL.Path)
 		}
 	}))
+}
+
+type capturedAuditEvent struct {
+	Source    string         `json:"source"`
+	EventType string         `json:"event_type"`
+	UserID    *int64         `json:"user_id,omitempty"`
+	TenantID  string         `json:"tenant_id,omitempty"`
+	Success   bool           `json:"success"`
+	Metadata  map[string]any `json:"metadata,omitempty"`
+}
+
+type auditCapture struct {
+	URL    string
+	Events chan capturedAuditEvent
+}
+
+func newNotificationSupportServers(t *testing.T) (*httptest.Server, auditCapture) {
+	t.Helper()
+	authSrv := newAuthLookupServer(t, "default", 42, "u@example.com")
+	seed := bytes.Repeat([]byte{6}, ed25519.SeedSize)
+	verifier, err := internaltoken.NewVerifier("auth-internal", map[string]ed25519.PublicKey{
+		"auth-internal-default": ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey),
+	}, 15*time.Second)
+	if err != nil {
+		t.Fatalf("new verifier: %v", err)
+	}
+	events := make(chan capturedAuditEvent, 8)
+	auditSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/internal/events" || r.Method != http.MethodPost {
+			t.Fatalf("unexpected audit request %s %s", r.Method, r.URL.Path)
+		}
+		authz := strings.TrimSpace(r.Header.Get("Authorization"))
+		if !strings.HasPrefix(authz, "Bearer ") {
+			t.Fatalf("expected bearer token, got %q", authz)
+		}
+		claims, err := verifier.Verify(strings.TrimSpace(strings.TrimPrefix(authz, "Bearer ")), "audit")
+		if err != nil {
+			t.Fatalf("verify audit token: %v", err)
+		}
+		if claims.Subject != "notification" || claims.Scope != "audit:events:write" {
+			t.Fatalf("unexpected claims: %+v", claims)
+		}
+		var payload capturedAuditEvent
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatalf("decode audit payload: %v", err)
+		}
+		events <- payload
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte(`{"status":"accepted"}`))
+	}))
+	t.Cleanup(auditSrv.Close)
+	return authSrv, auditCapture{URL: auditSrv.URL, Events: events}
 }
 
 func jsonNumber(v int64) string {

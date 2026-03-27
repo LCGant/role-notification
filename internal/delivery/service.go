@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -194,10 +195,10 @@ func (s *Service) processPending(ctx context.Context) {
 		}
 		if err := s.dispatch(ctx, job); err != nil {
 			if s.logger != nil {
-				s.logger.Warn("notification dispatch failed", "kind", job.Kind, "to", job.To, "attempts", job.Attempts+1, "err", err)
+				s.logger.Warn("notification dispatch failed", "kind", job.Kind, "to", hashEmail(job.To), "attempts", job.Attempts+1, "err", err)
 			}
 			if requeueErr := s.requeue(claimedPath, job); requeueErr != nil && s.logger != nil {
-				s.logger.Error("notification requeue failed", "kind", job.Kind, "to", job.To, "err", requeueErr)
+				s.logger.Error("notification requeue failed", "kind", job.Kind, "to", hashEmail(job.To), "err", requeueErr)
 			}
 			continue
 		}
@@ -360,4 +361,9 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func hashEmail(value string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(value))))
+	return hex.EncodeToString(sum[:8])
 }

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 
 	envconfig "github.com/LCGant/role-config"
 	internaltoken "github.com/LCGant/role-internaltoken"
@@ -29,9 +30,14 @@ type Config struct {
 	AuthBaseURL                string
 	AuthAllowedHosts           []string
 	AuthServiceTokenMintToken  string
+	AuditBaseURL               string
+	AuditAllowedHosts          []string
+	AuditSpoolDir              string
+	AuditTimeout               time.Duration
 	SessionCookie              string
 	DeviceCookie               string
 	AllowInsecureHTTP          bool
+	AuditAllowInsecureHTTP     bool
 	ServiceTokenIssuer         string
 	ServiceTokenAudience       string
 	ServiceTokenPublicKeys     map[string]ed25519.PublicKey
@@ -64,9 +70,14 @@ func Load() (Config, error) {
 		AuthBaseURL:                strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_BASE_URL", "")),
 		AuthAllowedHosts:           parseAllowedHosts(envconfig.EnvString("NOTIFICATION_AUTH_ALLOWED_HOSTS", "auth,auth.internal,localhost,127.0.0.1,::1")),
 		AuthServiceTokenMintToken:  strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN", "")),
+		AuditBaseURL:               strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUDIT_BASE_URL", envconfig.EnvString("AUDIT_BASE_URL", ""))),
+		AuditAllowedHosts:          parseAllowedHosts(envconfig.EnvString("NOTIFICATION_AUDIT_ALLOWED_HOSTS", "audit,audit.internal,localhost,127.0.0.1,::1")),
+		AuditSpoolDir:              strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUDIT_SPOOL_DIR", "")),
+		AuditTimeout:               envconfig.EnvDuration("NOTIFICATION_AUDIT_TIMEOUT", 5*time.Second),
 		SessionCookie:              strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SESSION_COOKIE", "session_id")),
 		DeviceCookie:               strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DEVICE_COOKIE", "device_id")),
 		AllowInsecureHTTP:          envconfig.EnvBool("NOTIFICATION_AUTH_ALLOW_INSECURE_HTTP", false),
+		AuditAllowInsecureHTTP:     envconfig.EnvBool("NOTIFICATION_AUDIT_ALLOW_INSECURE_HTTP", false),
 		ServiceTokenIssuer:         strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SERVICE_TOKEN_ISSUER", "auth-internal")),
 		ServiceTokenAudience:       strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SERVICE_TOKEN_AUDIENCE", "notification")),
 		ServiceTokenReplayRedisURL: strings.TrimSpace(os.Getenv("NOTIFICATION_SERVICE_TOKEN_REPLAY_REDIS_URL")),
@@ -143,6 +154,15 @@ func Load() (Config, error) {
 	}
 	if err := validateRemoteURL(cfg.AuthBaseURL, cfg.AllowInsecureHTTP, cfg.AuthAllowedHosts); err != nil {
 		return Config{}, fmt.Errorf("invalid NOTIFICATION_AUTH_BASE_URL: %w", err)
+	}
+	if cfg.AuditBaseURL != "" && (cfg.AuthBaseURL == "" || cfg.AuthServiceTokenMintToken == "") {
+		return Config{}, errors.New("NOTIFICATION_AUDIT_BASE_URL requires NOTIFICATION_AUTH_BASE_URL and NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN")
+	}
+	if cfg.AuditBaseURL == "" && cfg.AuditSpoolDir != "" {
+		return Config{}, errors.New("NOTIFICATION_AUDIT_SPOOL_DIR requires NOTIFICATION_AUDIT_BASE_URL")
+	}
+	if err := validateRemoteURL(cfg.AuditBaseURL, cfg.AuditAllowInsecureHTTP, cfg.AuditAllowedHosts); err != nil {
+		return Config{}, fmt.Errorf("invalid NOTIFICATION_AUDIT_BASE_URL: %w", err)
 	}
 	if rawKeys := strings.TrimSpace(os.Getenv("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS")); rawKeys != "" {
 		keys, err := internaltoken.ParsePublicKeySet(rawKeys)

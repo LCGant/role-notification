@@ -8,6 +8,7 @@ require (
 	github.com/LCGant/role-config v0.0.0
 	github.com/LCGant/role-crypto v0.0.0
 	github.com/LCGant/role-errors v0.0.0
+	github.com/LCGant/role-httpclient v0.0.0
 	github.com/LCGant/role-httpx v0.0.0
 	github.com/LCGant/role-internaltoken v0.0.0
 	github.com/LCGant/role-ratelimit v0.0.0
@@ -20,6 +21,8 @@ replace github.com/LCGant/role-config => ../../libs/config
 replace github.com/LCGant/role-crypto => ../../libs/crypto
 
 replace github.com/LCGant/role-errors => ../../libs/errors
+
+replace github.com/LCGant/role-httpclient => ../../libs/httpclient
 
 replace github.com/LCGant/role-httpx => ../../libs/httpx
 

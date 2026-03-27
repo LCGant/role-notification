@@ -18,6 +18,7 @@ import (
 	libcrypto "github.com/LCGant/role-crypto"
 	"github.com/LCGant/role-httpx"
 	internaltoken "github.com/LCGant/role-internaltoken"
+	"github.com/LCGant/role-notification/internal/auditclient"
 	"github.com/LCGant/role-notification/internal/authclient"
 	"github.com/LCGant/role-notification/internal/config"
 	"github.com/LCGant/role-notification/internal/delivery"
@@ -33,6 +34,7 @@ type Server struct {
 	inbox       basestore.InboxStore
 	authn       Authenticator
 	authUsers   *authclient.Client
+	audit       *auditclient.Client
 	mux         *nethttp.ServeMux
 	serviceJWT  *internaltoken.Verifier
 	mailLimiter ratelimit.Limiter
@@ -101,6 +103,7 @@ func NewWithDependencies(cfg config.Config, logger *slog.Logger, svc *delivery.S
 		inbox:     inbox,
 		authn:     authn,
 		authUsers: users,
+		audit:     auditclient.New(cfg),
 		mux:       nethttp.NewServeMux(),
 		mailLimiter: ratelimit.Counter(ratelimit.CounterConfig{
 			Requests: 5,
@@ -237,6 +240,13 @@ func (s *Server) handleVerification(w nethttp.ResponseWriter, r *nethttp.Request
 		httpx.WriteError(w, nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}
+	s.recordAudit(r.Context(), auditclient.Event{
+		Source:    "notification",
+		EventType: "notification:verify:sent",
+		Success:   true,
+		Metadata:  map[string]any{"email_hash": hashEmail(normalizedTo), "delivery": "queued"},
+		CreatedAt: time.Now().UTC(),
+	})
 	httpx.WriteJSON(w, nethttp.StatusAccepted, map[string]string{"status": "queued"})
 }
 
@@ -266,6 +276,13 @@ func (s *Server) handlePasswordReset(w nethttp.ResponseWriter, r *nethttp.Reques
 		httpx.WriteError(w, nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}
+	s.recordAudit(r.Context(), auditclient.Event{
+		Source:    "notification",
+		EventType: "notification:reset:sent",
+		Success:   true,
+		Metadata:  map[string]any{"email_hash": hashEmail(normalizedTo), "delivery": "queued"},
+		CreatedAt: time.Now().UTC(),
+	})
 	httpx.WriteJSON(w, nethttp.StatusAccepted, map[string]string{"status": "queued"})
 }
 
@@ -495,6 +512,15 @@ func (s *Server) handleReadNotification(w nethttp.ResponseWriter, r *nethttp.Req
 		"notification": presentNotification(notification),
 		"unread_count": unreadCount,
 	})
+	s.recordAudit(r.Context(), auditclient.Event{
+		Source:    "notification",
+		EventType: "notification:read",
+		UserID:    &viewer.UserID,
+		TenantID:  viewer.TenantID,
+		Success:   true,
+		Metadata:  map[string]any{"notification_id": notification.PublicID},
+		CreatedAt: time.Now().UTC(),
+	})
 }
 
 func (s *Server) handleReadAllNotifications(w nethttp.ResponseWriter, r *nethttp.Request, viewer viewer) {
@@ -507,6 +533,15 @@ func (s *Server) handleReadAllNotifications(w nethttp.ResponseWriter, r *nethttp
 	httpx.WriteJSON(w, nethttp.StatusOK, map[string]int{
 		"marked_read":  updated,
 		"unread_count": 0,
+	})
+	s.recordAudit(r.Context(), auditclient.Event{
+		Source:    "notification",
+		EventType: "notification:read-all",
+		UserID:    &viewer.UserID,
+		TenantID:  viewer.TenantID,
+		Success:   true,
+		Metadata:  map[string]any{"marked_read": updated},
+		CreatedAt: time.Now().UTC(),
 	})
 }
 
@@ -566,4 +601,18 @@ func kindGroup(kind string) string {
 	default:
 		return "system"
 	}
+}
+
+func (s *Server) recordAudit(ctx context.Context, event auditclient.Event) {
+	if s.audit == nil {
+		return
+	}
+	if err := s.audit.Record(ctx, event); err != nil && s.logger != nil {
+		s.logger.Warn("notification audit forward dropped", "event", event.EventType, "err", err)
+	}
+}
+
+func hashEmail(value string) string {
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(value))))
+	return hex.EncodeToString(sum[:8])
 }
