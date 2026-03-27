@@ -163,3 +163,48 @@ func TestProcessPendingClaimsJobsAtomically(t *testing.T) {
 		t.Fatalf("expected single delivery, got %#v", backend.sent)
 	}
 }
+
+func TestQueueKeyDerivationIsDeterministic(t *testing.T) {
+	rawKey := bytes.Repeat([]byte{5}, 32)
+	keyA, err := deriveQueueKey(rawKey)
+	if err != nil {
+		t.Fatalf("derive key A: %v", err)
+	}
+	keyB, err := deriveQueueKey(rawKey)
+	if err != nil {
+		t.Fatalf("derive key B: %v", err)
+	}
+	if !bytes.Equal(keyA, keyB) {
+		t.Fatalf("expected deterministic queue key derivation")
+	}
+	if bytes.Equal(keyA, rawKey) {
+		t.Fatalf("expected derived queue key to differ from raw secret")
+	}
+}
+
+func TestQueueSupportsVersionedKeyRotation(t *testing.T) {
+	dir := t.TempDir()
+	backend := &stubSender{}
+
+	legacy := New(dir, bytes.Repeat([]byte{1}, 32), backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := legacy.EnqueueVerification(context.Background(), "u@example.com", "legacy-token"); err != nil {
+		t.Fatalf("enqueue legacy: %v", err)
+	}
+	time.Sleep(time.Millisecond)
+
+	rotated := NewWithKeyring(dir, "v2", map[string][]byte{
+		"v1": bytes.Repeat([]byte{1}, 32),
+		"v2": bytes.Repeat([]byte{2}, 32),
+	}, backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := rotated.EnqueueVerification(context.Background(), "u@example.com", "new-token"); err != nil {
+		t.Fatalf("enqueue new: %v", err)
+	}
+
+	rotated.processPending(context.Background())
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.sent) != 2 {
+		t.Fatalf("expected both legacy and rotated jobs to be delivered, got %#v", backend.sent)
+	}
+}

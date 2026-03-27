@@ -100,7 +100,15 @@ func NewWithDependencies(cfg config.Config, logger *slog.Logger, svc *delivery.S
 		mux:       nethttp.NewServeMux(),
 	}
 	if len(cfg.ServiceTokenPublicKeys) > 0 {
-		verifier, err := internaltoken.NewVerifier(cfg.ServiceTokenIssuer, cfg.ServiceTokenPublicKeys, 15*time.Second)
+		var verifierOpts []internaltoken.VerifierOption
+		if cfg.ServiceTokenReplayRedisURL != "" {
+			replayGuard, err := internaltoken.NewRedisReplayGuard(cfg.ServiceTokenReplayRedisURL, "notification:internaltoken:jti:")
+			if err != nil {
+				panic(err)
+			}
+			verifierOpts = append(verifierOpts, internaltoken.WithReplayGuard(replayGuard))
+		}
+		verifier, err := internaltoken.NewVerifier(cfg.ServiceTokenIssuer, cfg.ServiceTokenPublicKeys, 15*time.Second, verifierOpts...)
 		if err != nil {
 			panic(err)
 		}

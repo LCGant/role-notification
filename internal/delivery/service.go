@@ -5,6 +5,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"time"
 
 	"github.com/LCGant/role-notification/internal/sender"
+	"golang.org/x/crypto/hkdf"
 )
 
 type Kind string
@@ -39,23 +41,52 @@ type Job struct {
 }
 
 type Service struct {
-	queueDir string
-	queueKey []byte
-	sender   sender.Sender
-	logger   *slog.Logger
+	queueDir         string
+	queueKeys        map[string][]byte
+	activeKeyVersion string
+	legacyKeyVersion string
+	sender           sender.Sender
+	logger           *slog.Logger
 }
 
 type envelope struct {
+	KeyVersion string `json:"key_version,omitempty"`
 	Nonce      string `json:"nonce"`
 	Ciphertext string `json:"ciphertext"`
 }
 
 func New(queueDir string, queueKey []byte, backend sender.Sender, logger *slog.Logger) *Service {
+	return NewWithKeyring(queueDir, "v1", map[string][]byte{"v1": queueKey}, backend, logger)
+}
+
+func NewWithKeyring(queueDir, activeKeyVersion string, queueKeys map[string][]byte, backend sender.Sender, logger *slog.Logger) *Service {
+	derivedKeys := map[string][]byte{}
+	for version, rawKey := range queueKeys {
+		version = strings.TrimSpace(version)
+		if version == "" || len(rawKey) == 0 {
+			continue
+		}
+		derived, err := deriveQueueKey(rawKey)
+		if err != nil {
+			panic(err)
+		}
+		derivedKeys[version] = derived
+	}
+	activeKeyVersion = strings.TrimSpace(activeKeyVersion)
+	if activeKeyVersion == "" {
+		activeKeyVersion = "v1"
+	}
+	legacyKeyVersion := "v1"
+	if _, ok := derivedKeys[legacyKeyVersion]; !ok {
+		legacyKeyVersion = activeKeyVersion
+	}
 	return &Service{
-		queueDir: queueDir,
-		queueKey: append([]byte(nil), queueKey...),
-		sender:   backend,
-		logger:   logger,
+		queueDir:         queueDir,
+		queueKeys:        derivedKeys,
+		activeKeyVersion: activeKeyVersion,
+		legacyKeyVersion: legacyKeyVersion,
+		sender:           backend,
+		logger:           logger,
 	}
 }
 
@@ -232,7 +263,11 @@ func (s *Service) encryptJob(job Job) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	block, err := aes.NewCipher(s.queueKey)
+	queueKey, err := s.queueKeyForVersion(s.activeKeyVersion)
+	if err != nil {
+		return nil, err
+	}
+	block, err := aes.NewCipher(queueKey)
 	if err != nil {
 		return nil, err
 	}
@@ -246,6 +281,7 @@ func (s *Service) encryptJob(job Job) ([]byte, error) {
 	}
 	sealed := gcm.Seal(nil, nonce, plain, nil)
 	return json.Marshal(envelope{
+		KeyVersion: s.activeKeyVersion,
 		Nonce:      base64.StdEncoding.EncodeToString(nonce),
 		Ciphertext: base64.StdEncoding.EncodeToString(sealed),
 	})
@@ -264,7 +300,15 @@ func (s *Service) decryptJob(payload []byte, job *Job) error {
 	if err != nil {
 		return err
 	}
-	block, err := aes.NewCipher(s.queueKey)
+	keyVersion := strings.TrimSpace(env.KeyVersion)
+	if keyVersion == "" {
+		keyVersion = s.legacyKeyVersion
+	}
+	queueKey, err := s.queueKeyForVersion(keyVersion)
+	if err != nil {
+		return err
+	}
+	block, err := aes.NewCipher(queueKey)
 	if err != nil {
 		return err
 	}
@@ -277,6 +321,27 @@ func (s *Service) decryptJob(payload []byte, job *Job) error {
 		return err
 	}
 	return json.Unmarshal(plain, job)
+}
+
+func (s *Service) queueKeyForVersion(version string) ([]byte, error) {
+	version = strings.TrimSpace(version)
+	if version == "" {
+		return nil, fmt.Errorf("queue key version is required")
+	}
+	key, ok := s.queueKeys[version]
+	if !ok || len(key) == 0 {
+		return nil, fmt.Errorf("queue key version %q is not configured", version)
+	}
+	return key, nil
+}
+
+func deriveQueueKey(secret []byte) ([]byte, error) {
+	reader := hkdf.New(sha256.New, secret, []byte("role-notification-queue"), []byte("notification-queue-v1"))
+	key := make([]byte, 32)
+	if _, err := io.ReadFull(reader, key); err != nil {
+		return nil, err
+	}
+	return key, nil
 }
 
 func backoffForAttempt(attempt int) time.Duration {

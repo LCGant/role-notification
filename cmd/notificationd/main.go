@@ -40,7 +40,7 @@ func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level}))
 
 	backend := sender.New(cfg.Mail)
-	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, backend, logger)
+	queue := delivery.NewWithKeyring(cfg.QueueDir, cfg.QueueKeyVersion, cfg.QueueKeys, backend, logger)
 	var inbox basestore.InboxStore
 	var closeDB func()
 	if cfg.DBURL != "" {

@@ -187,21 +187,10 @@ func (c *Client) bearerToken(ctx context.Context, scope string) (string, error) 
 	if scope == "" || c.mintToken == "" || c.baseURL == "" {
 		return "", nil
 	}
-	c.mu.Lock()
-	cached, ok := c.tokenCache[scope]
-	if ok && time.Until(cached.expiresAt) > 15*time.Second {
-		c.mu.Unlock()
-		return cached.value, nil
-	}
-	c.mu.Unlock()
-
-	token, expiresAt, err := c.mintAuthToken(ctx, scope)
+	token, _, err := c.mintAuthToken(ctx, scope)
 	if err != nil {
 		return "", err
 	}
-	c.mu.Lock()
-	c.tokenCache[scope] = cachedToken{value: token, expiresAt: expiresAt}
-	c.mu.Unlock()
 	return token, nil
 }
 
