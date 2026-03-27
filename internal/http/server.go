@@ -189,11 +189,21 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
+	callerTenantID := strings.TrimSpace(r.Header.Get("X-Caller-Tenant-Id"))
 	req.TenantID = strings.TrimSpace(req.TenantID)
 	req.To = strings.TrimSpace(req.To)
 	req.Kind = strings.TrimSpace(strings.ToLower(req.Kind))
 	req.Subject = sanitizeNotificationText(req.Subject)
 	req.Body = sanitizeNotificationText(req.Body)
+	// Social notifications must carry tenant context in a caller-controlled
+	// transport header. Rejecting missing or mismatched tenant values makes the
+	// trust boundary explicit and prevents accidental cross-tenant writes from a
+	// stale request body.
+	if callerTenantID == "" || (req.TenantID != "" && !strings.EqualFold(req.TenantID, callerTenantID)) {
+		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
+		return
+	}
+	req.TenantID = callerTenantID
 	if req.UserID <= 0 || req.TenantID == "" || req.Kind == "" || req.Subject == "" || req.Body == "" || req.To != "" {
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
 		return
@@ -206,6 +216,7 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 		httpx.WriteError(w, nethttp.StatusServiceUnavailable, "auth_unavailable")
 		return
 	}
+	s.logger.Info("internal social notification request", "tenant_id", req.TenantID, "user_id", req.UserID, "kind", req.Kind)
 	user, lookupErr := s.authUsers.LookupUser(r.Context(), req.UserID, req.TenantID)
 	if lookupErr != nil {
 		s.logger.Warn("notification user lookup failed", "user_id", req.UserID, "tenant_id", req.TenantID, "err", lookupErr)
@@ -281,7 +292,7 @@ func sanitizeNotificationText(value string) string {
 
 func isAllowedSocialKind(value string) bool {
 	switch value {
-	case "follow", "friend_request", "friend_accept", "post_comment", "event_invite", "playlist_share", "playlist_collaborator":
+	case "follow", "friend_request", "friend_accept", "post_comment", "post_share", "event_invite", "playlist_share", "playlist_collaborator":
 		return true
 	default:
 		return false
@@ -433,6 +444,8 @@ func kindLabel(kind string) string {
 		return "Friend request accepted"
 	case "post_comment":
 		return "New comment"
+	case "post_share":
+		return "Post shared"
 	case "playlist_share":
 		return "Playlist shared"
 	case "playlist_collaborator":
@@ -448,7 +461,7 @@ func kindGroup(kind string) string {
 	switch strings.TrimSpace(strings.ToLower(kind)) {
 	case "follow", "friend_request", "friend_accept":
 		return "social_graph"
-	case "post_comment", "playlist_share", "playlist_collaborator":
+	case "post_comment", "post_share", "playlist_share", "playlist_collaborator":
 		return "content"
 	case "event_invite":
 		return "events"

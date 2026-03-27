@@ -93,6 +93,7 @@ func TestSocialNotificationWritesOutbox(t *testing.T) {
 	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"New follower","body":"Alice started following you."}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Token", "social-secret")
+	req.Header.Set("X-Caller-Tenant-Id", "default")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusAccepted {
@@ -115,6 +116,7 @@ func TestSocialNotificationSanitizesHTMLBeforePersisting(t *testing.T) {
 	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"<b>New follower</b>","body":"<script>alert(1)</script>Hello"}`))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Token", "social-secret")
+	req.Header.Set("X-Caller-Tenant-Id", "default")
 	rr := httptest.NewRecorder()
 	h.ServeHTTP(rr, req)
 	if rr.Code != http.StatusAccepted {
@@ -133,6 +135,37 @@ func TestSocialNotificationSanitizesHTMLBeforePersisting(t *testing.T) {
 	}
 	if items[0].Body != "&lt;script&gt;alert(1)&lt;/script&gt;Hello" {
 		t.Fatalf("unexpected sanitized body: %q", items[0].Body)
+	}
+}
+
+func TestSocialNotificationRejectsMissingOrMismatchedCallerTenant(t *testing.T) {
+	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", SocialInternalToken: "social-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{9}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
+	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	inbox := memory.New()
+	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"user":{"id":42,"tenant_id":"default","email":"u@example.com"}}`))
+	}))
+	defer authSrv.Close()
+	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, inbox, nil, authclient.New(authSrv.URL, "lookup-secret"))
+
+	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"New follower","body":"Alice started following you."}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "social-secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 without caller tenant header, got %d", rr.Code)
+	}
+
+	req = httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"New follower","body":"Alice started following you."}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Internal-Token", "social-secret")
+	req.Header.Set("X-Caller-Tenant-Id", "tenant-99")
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for mismatched caller tenant, got %d", rr.Code)
 	}
 }
 
