@@ -1,5 +1,3 @@
-github.com/LCGant/role-pep v0.0.0-20260317112219-be7e459b5a57 h1:skcQocN4Xeo3GH0WBEnPHkrP6w7y6CHFyd1lnqOwj3c=
-github.com/LCGant/role-pep v0.0.0-20260317112219-be7e459b5a57/go.mod h1:CvlsKBt2uDRyV19HPqOyrgWmRi5TDG/T4fxIKOOZLzI=
 github.com/davecgh/go-spew v1.1.0/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=
 github.com/davecgh/go-spew v1.1.1 h1:vj9j/u1bqnvCEfJOwUhtlOARqs3+rkHYY13jYWTU97c=
 github.com/davecgh/go-spew v1.1.1/go.mod h1:J7Y8YcW2NihsgmVo/mv3lAwl/skON4iLHjSsI+c5H38=

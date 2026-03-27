@@ -83,7 +83,7 @@ func New(cfg config.Config, logger *slog.Logger, svc *delivery.Service, inbox ba
 	if err != nil {
 		panic(err)
 	}
-	return NewWithDependencies(cfg, logger, svc, inbox, authn, authclient.New(cfg.AuthBaseURL, cfg.AuthUserLookupInternalToken))
+	return NewWithDependencies(cfg, logger, svc, inbox, authn, authclient.New(cfg.AuthBaseURL, cfg.AuthServiceTokenMintToken))
 }
 
 func NewWithDependencies(cfg config.Config, logger *slog.Logger, svc *delivery.Service, inbox basestore.InboxStore, authn Authenticator, users *authclient.Client) nethttp.Handler {
@@ -163,10 +163,6 @@ func (s *Server) internalSocialAuth(next nethttp.HandlerFunc) nethttp.Handler {
 			}
 			ctx := context.WithValue(r.Context(), internalSocialClaimsKey{}, claims)
 			next(w, r.WithContext(ctx))
-			return
-		}
-		if s.cfg.AllowLegacySocialToken && s.cfg.SocialInternalToken != "" && libcrypto.ConstantTimeEqual(strings.TrimSpace(r.Header.Get("X-Internal-Token")), s.cfg.SocialInternalToken) {
-			next(w, r)
 			return
 		}
 		httpx.WriteError(w, nethttp.StatusUnauthorized, "unauthorized")

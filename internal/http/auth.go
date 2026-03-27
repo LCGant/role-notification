@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 
 	apperrors "github.com/LCGant/role-errors"
+	"github.com/LCGant/role-notification/internal/authclient"
 	"github.com/LCGant/role-notification/internal/config"
-	"github.com/LCGant/role-pep/pep"
 )
 
 var ErrUnauthorized = apperrors.ErrUnauthorized
@@ -24,57 +23,59 @@ type Authenticator interface {
 }
 
 type sessionAuthenticator struct {
-	introspector *pep.Introspector
+	auth         *authclient.Client
 	cookieName   string
 	deviceCookie string
 }
 
 func newAuthenticator(cfg config.Config) (Authenticator, error) {
-	if cfg.AuthBaseURL == "" || cfg.AuthIntrospectionInternalToken == "" {
+	if cfg.AuthBaseURL == "" || cfg.AuthServiceTokenMintToken == "" {
 		return nil, nil
 	}
-	introspector, err := pep.NewIntrospector(pep.IntrospectConfig{
-		AuthBaseURL:       cfg.AuthBaseURL,
-		InternalToken:     cfg.AuthIntrospectionInternalToken,
-		CookieName:        cfg.SessionCookie,
-		DeviceCookieName:  cfg.DeviceCookie,
-		AllowInsecureHTTP: cfg.AllowInsecureHTTP,
-	})
-	if err != nil {
-		return nil, err
+	client := authclient.New(cfg.AuthBaseURL, cfg.AuthServiceTokenMintToken)
+	if client == nil {
+		return nil, nil
 	}
 	return &sessionAuthenticator{
-		introspector: introspector,
+		auth:         client,
 		cookieName:   cfg.SessionCookie,
 		deviceCookie: cfg.DeviceCookie,
 	}, nil
 }
 
 func (a *sessionAuthenticator) Required(ctx context.Context, r *http.Request) (viewer, error) {
-	sessionToken, err := pep.ExtractSessionToken(r, a.cookieName)
+	sessionToken, err := extractCookieValue(r, a.cookieName)
 	if err != nil {
-		if errors.Is(err, pep.ErrUnauthenticated) {
+		if errors.Is(err, ErrUnauthorized) {
 			return viewer{}, ErrUnauthorized
 		}
 		return viewer{}, err
 	}
-	deviceToken := pep.ExtractDeviceToken(r, a.deviceCookie)
-	subject, _, active, err := a.introspector.Introspect(ctx, sessionToken, deviceToken)
+	deviceToken, _ := extractCookieValue(r, a.deviceCookie)
+	subject, active, err := a.auth.Introspect(ctx, sessionToken, deviceToken)
 	if err != nil {
-		if errors.Is(err, pep.ErrUnauthenticated) {
-			return viewer{}, ErrUnauthorized
-		}
 		return viewer{}, err
 	}
-	if !active {
+	if !active || subject == nil {
 		return viewer{}, ErrUnauthorized
 	}
-	userID, err := strconv.ParseInt(strings.TrimSpace(subject.UserID), 10, 64)
-	if err != nil || userID <= 0 {
+	if subject.UserID <= 0 {
 		return viewer{}, ErrUnauthorized
 	}
 	return viewer{
-		UserID:   userID,
+		UserID:   subject.UserID,
 		TenantID: strings.TrimSpace(subject.TenantID),
 	}, nil
+}
+
+func extractCookieValue(r *http.Request, name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", ErrUnauthorized
+	}
+	cookie, err := r.Cookie(name)
+	if err != nil || strings.TrimSpace(cookie.Value) == "" {
+		return "", ErrUnauthorized
+	}
+	return strings.TrimSpace(cookie.Value), nil
 }

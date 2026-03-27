@@ -23,8 +23,7 @@ type Config struct {
 	QueueDir                       string
 	QueueKey                       []byte
 	AuthBaseURL                    string
-	AuthIntrospectionInternalToken string
-	AuthUserLookupInternalToken    string
+	AuthServiceTokenMintToken      string
 	SessionCookie                  string
 	DeviceCookie                   string
 	AllowInsecureHTTP              bool
@@ -59,8 +58,7 @@ func Load() (Config, error) {
 		Env:                            envconfig.EnvString("NOTIFICATION_ENV", "development"),
 		QueueDir:                       strings.TrimSpace(envconfig.EnvString("NOTIFICATION_QUEUE_DIR", "/tmp/notification-queue")),
 		AuthBaseURL:                    strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_BASE_URL", "")),
-		AuthIntrospectionInternalToken: strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_INTROSPECTION_INTERNAL_TOKEN", "")),
-		AuthUserLookupInternalToken:    strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_USER_LOOKUP_INTERNAL_TOKEN", "")),
+		AuthServiceTokenMintToken:      strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN", "")),
 		SessionCookie:                  strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SESSION_COOKIE", "session_id")),
 		DeviceCookie:                   strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DEVICE_COOKIE", "device_id")),
 		AllowInsecureHTTP:              envconfig.EnvBool("NOTIFICATION_AUTH_ALLOW_INSECURE_HTTP", false),
@@ -114,17 +112,11 @@ func Load() (Config, error) {
 	if strings.EqualFold(strings.TrimSpace(cfg.Env), "production") && cfg.Mail.OutboxDir != "" {
 		return Config{}, errors.New("EMAIL_OUTBOX_DIR is not allowed in production")
 	}
-	if cfg.AuthBaseURL != "" && cfg.AuthIntrospectionInternalToken == "" {
-		return Config{}, errors.New("NOTIFICATION_AUTH_INTROSPECTION_INTERNAL_TOKEN is required when NOTIFICATION_AUTH_BASE_URL is set")
+	if cfg.AuthBaseURL != "" && cfg.AuthServiceTokenMintToken == "" {
+		return Config{}, errors.New("NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN is required when NOTIFICATION_AUTH_BASE_URL is set")
 	}
-	if cfg.AuthBaseURL != "" && cfg.AuthUserLookupInternalToken == "" {
-		return Config{}, errors.New("NOTIFICATION_AUTH_USER_LOOKUP_INTERNAL_TOKEN is required when NOTIFICATION_AUTH_BASE_URL is set")
-	}
-	if cfg.AuthBaseURL == "" && cfg.AuthIntrospectionInternalToken != "" {
-		return Config{}, errors.New("NOTIFICATION_AUTH_BASE_URL is required when NOTIFICATION_AUTH_INTROSPECTION_INTERNAL_TOKEN is set")
-	}
-	if cfg.AuthBaseURL == "" && cfg.AuthUserLookupInternalToken != "" {
-		return Config{}, errors.New("NOTIFICATION_AUTH_BASE_URL is required when NOTIFICATION_AUTH_USER_LOOKUP_INTERNAL_TOKEN is set")
+	if cfg.AuthBaseURL == "" && cfg.AuthServiceTokenMintToken != "" {
+		return Config{}, errors.New("NOTIFICATION_AUTH_BASE_URL is required when NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN is set")
 	}
 	if rawKeys := strings.TrimSpace(os.Getenv("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS")); rawKeys != "" {
 		keys, err := internaltoken.ParsePublicKeySet(rawKeys)
@@ -133,8 +125,8 @@ func Load() (Config, error) {
 		}
 		cfg.ServiceTokenPublicKeys = keys
 	}
-	if len(cfg.ServiceTokenPublicKeys) == 0 && cfg.SocialInternalToken == "" {
-		return Config{}, errors.New("configure NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS or NOTIFICATION_SOCIAL_INTERNAL_TOKEN")
+	if len(cfg.ServiceTokenPublicKeys) == 0 {
+		return Config{}, errors.New("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS is required")
 	}
 	if len(cfg.ServiceTokenPublicKeys) > 0 {
 		if cfg.ServiceTokenIssuer == "" || cfg.ServiceTokenAudience == "" {

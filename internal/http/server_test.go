@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,18 +81,9 @@ func TestSocialNotificationWritesOutbox(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go queue.Run(ctx)
-	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("X-Internal-Token") != "lookup-secret" {
-			t.Fatalf("unexpected auth lookup token")
-		}
-		if r.Header.Get("X-Tenant-Id") != "default" {
-			t.Fatalf("unexpected tenant header")
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"user":{"id":42,"tenant_id":"default","email":"u@example.com"}}`))
-	}))
+	authSrv := newAuthLookupServer(t, "default", 42, "u@example.com")
 	defer authSrv.Close()
-	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New(), nil, authclient.New(authSrv.URL, "lookup-secret"))
+	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New(), nil, authclient.New(authSrv.URL, "notification-mint-secret"))
 
 	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"New follower","body":"Alice started following you."}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -107,12 +100,9 @@ func TestSocialNotificationSanitizesHTMLBeforePersisting(t *testing.T) {
 	cfg, signer := socialTokenConfig(t, bytes.Repeat([]byte{9}, 32), t.TempDir())
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	inbox := memory.New()
-	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"user":{"id":42,"tenant_id":"default","email":"u@example.com"}}`))
-	}))
+	authSrv := newAuthLookupServer(t, "default", 42, "u@example.com")
 	defer authSrv.Close()
-	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, inbox, nil, authclient.New(authSrv.URL, "lookup-secret"))
+	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, inbox, nil, authclient.New(authSrv.URL, "notification-mint-secret"))
 
 	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"<b>New follower</b>","body":"<script>alert(1)</script>Hello"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -142,12 +132,9 @@ func TestSocialNotificationRejectsMissingAuthOrTenantMismatch(t *testing.T) {
 	cfg, signer := socialTokenConfig(t, bytes.Repeat([]byte{9}, 32), t.TempDir())
 	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	inbox := memory.New()
-	authSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"user":{"id":42,"tenant_id":"default","email":"u@example.com"}}`))
-	}))
+	authSrv := newAuthLookupServer(t, "default", 42, "u@example.com")
 	defer authSrv.Close()
-	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, inbox, nil, authclient.New(authSrv.URL, "lookup-secret"))
+	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, inbox, nil, authclient.New(authSrv.URL, "notification-mint-secret"))
 
 	req := httptest.NewRequest("POST", "/internal/social", bytes.NewBufferString(`{"user_id":42,"tenant_id":"default","kind":"follow","subject":"New follower","body":"Alice started following you."}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -331,6 +318,70 @@ func socialTokenConfig(t *testing.T, queueKey []byte, outboxDir string) (config.
 		},
 		Mail: config.MailConfig{OutboxDir: outboxDir},
 	}, signer
+}
+
+func newAuthLookupServer(t *testing.T, tenantID string, userID int64, email string) *httptest.Server {
+	t.Helper()
+	seed := bytes.Repeat([]byte{6}, ed25519.SeedSize)
+	signer, err := internaltoken.NewSigner("auth-internal", "auth-internal-default", seed)
+	if err != nil {
+		t.Fatalf("new signer: %v", err)
+	}
+	verifier, err := internaltoken.NewVerifier("auth-internal", map[string]ed25519.PublicKey{
+		"auth-internal-default": ed25519.NewKeyFromSeed(seed).Public().(ed25519.PublicKey),
+	}, 15*time.Second)
+	if err != nil {
+		t.Fatalf("new verifier: %v", err)
+	}
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/internal/service-tokens":
+			if r.Header.Get("X-Internal-Token") != "notification-mint-secret" {
+				t.Fatalf("unexpected mint token: %q", r.Header.Get("X-Internal-Token"))
+			}
+			var req struct {
+				Audience string `json:"audience"`
+				Scope    string `json:"scope"`
+				TenantID string `json:"tenant_id,omitempty"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode mint request: %v", err)
+			}
+			if req.Audience != "auth" || (req.Scope != "auth:users:read" && req.Scope != "auth:sessions:introspect") || req.TenantID != "" {
+				t.Fatalf("unexpected mint request: %+v", req)
+			}
+			token, claims, err := signer.Mint("notification", "auth", req.Scope, "", time.Minute)
+			if err != nil {
+				t.Fatalf("mint auth token: %v", err)
+			}
+			httpx := map[string]any{"token": map[string]string{"value": token, "expires_at": claims.ExpiresAt.UTC().Format(time.RFC3339)}}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(httpx)
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/internal/users/"):
+			authz := strings.TrimSpace(r.Header.Get("Authorization"))
+			if !strings.HasPrefix(authz, "Bearer ") {
+				t.Fatalf("expected bearer token, got %q", authz)
+			}
+			claims, err := verifier.Verify(strings.TrimSpace(strings.TrimPrefix(authz, "Bearer ")), "auth")
+			if err != nil {
+				t.Fatalf("verify lookup token: %v", err)
+			}
+			if claims.Subject != "notification" || claims.Scope != "auth:users:read" {
+				t.Fatalf("unexpected claims: %+v", claims)
+			}
+			if r.Header.Get("X-Tenant-Id") != tenantID {
+				t.Fatalf("unexpected tenant header: %q", r.Header.Get("X-Tenant-Id"))
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"user":{"id":` + jsonNumber(userID) + `,"tenant_id":"` + tenantID + `","email":"` + email + `"}}`))
+		default:
+			t.Fatalf("unexpected auth request %s %s", r.Method, r.URL.Path)
+		}
+	}))
+}
+
+func jsonNumber(v int64) string {
+	return strconv.FormatInt(v, 10)
 }
 
 func issueSocialToken(t *testing.T, signer *internaltoken.Signer, tenantID string) string {
