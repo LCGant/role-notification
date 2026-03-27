@@ -124,6 +124,8 @@ func NewWithDependencies(cfg config.Config, logger *slog.Logger, svc *delivery.S
 			panic(err)
 		}
 		s.serviceJWT = verifier
+	} else if logger != nil {
+		logger.Warn("notification service bearer verifier disabled: no public keys configured")
 	}
 	s.routes()
 	return s
@@ -354,12 +356,19 @@ func (s *Server) handleSocial(w nethttp.ResponseWriter, r *nethttp.Request) {
 		return
 	}
 	email := strings.TrimSpace(user.Email)
+	emailDelivery := "skipped"
 	if email != "" {
+		emailDelivery = "queued"
 		if err := s.deliverer.EnqueueSocial(r.Context(), email, req.Subject, req.Body); err != nil {
 			s.logger.Warn("enqueue social notification email failed", "user_id", req.UserID, "tenant_id", req.TenantID, "err", err)
+			emailDelivery = "failed"
 		}
 	}
-	httpx.WriteJSON(w, nethttp.StatusAccepted, map[string]any{"status": "queued", "notification_id": notification.PublicID})
+	httpx.WriteJSON(w, nethttp.StatusAccepted, map[string]any{
+		"status":          "queued",
+		"notification_id": notification.PublicID,
+		"email_delivery":  emailDelivery,
+	})
 }
 
 func normalizeEmailAddress(value string) (string, error) {

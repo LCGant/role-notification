@@ -101,7 +101,7 @@ func (c *Client) LookupUser(ctx context.Context, userID int64, tenantID string) 
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-Tenant-Id", strings.TrimSpace(tenantID))
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +155,7 @@ func (c *Client) Introspect(ctx context.Context, sessionToken, deviceToken strin
 		req.Header.Set("X-Device-Token", strings.TrimSpace(deviceToken))
 	}
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return nil, false, err
 	}
@@ -209,7 +209,7 @@ func (c *Client) mintAuthToken(ctx context.Context, scope string) (string, time.
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Internal-Token", c.mintToken)
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := c.doWithRetry(req)
 	if err != nil {
 		return "", time.Time{}, err
 	}
@@ -229,4 +229,34 @@ func (c *Client) mintAuthToken(ctx context.Context, scope string) (string, time.
 		return "", time.Time{}, err
 	}
 	return strings.TrimSpace(out.Token.Value), expiresAt, nil
+}
+
+func (c *Client) doWithRetry(req *http.Request) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		cloned := req.Clone(req.Context())
+		resp, err := c.httpClient.Do(cloned)
+		if err == nil && !shouldRetryStatus(resp.StatusCode) {
+			return resp, nil
+		}
+		if err == nil {
+			lastErr = fmt.Errorf("auth returned %d", resp.StatusCode)
+			resp.Body.Close()
+		} else {
+			lastErr = err
+		}
+		if attempt == 2 {
+			break
+		}
+		select {
+		case <-req.Context().Done():
+			return nil, req.Context().Err()
+		case <-time.After(time.Duration(50*(1<<attempt)) * time.Millisecond):
+		}
+	}
+	return nil, lastErr
+}
+
+func shouldRetryStatus(status int) bool {
+	return status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }

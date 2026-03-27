@@ -195,9 +195,25 @@ func normalizeAddress(value string) (string, error) {
 	return strings.TrimSpace(addr.Address), nil
 }
 
+func renderTokenURLTemplate(rawTemplate, token string) string {
+	rawTemplate = strings.TrimSpace(rawTemplate)
+	token = strings.TrimSpace(token)
+	if rawTemplate == "" || token == "" {
+		return ""
+	}
+	if strings.Count(rawTemplate, "{{token}}") != 1 {
+		return ""
+	}
+	candidate := strings.Replace(rawTemplate, "{{token}}", token, 1)
+	if strings.Contains(candidate, "{{") || strings.Contains(candidate, "}}") {
+		return ""
+	}
+	return strings.TrimSpace(candidate)
+}
+
 func verificationBody(cfg config.MailConfig, token string) string {
 	token = strings.TrimSpace(token)
-	if link := strings.TrimSpace(strings.ReplaceAll(cfg.EmailVerificationURLTemplate, "{{token}}", token)); link != "" {
+	if link := renderTokenURLTemplate(cfg.EmailVerificationURLTemplate, token); link != "" {
 		return fmt.Sprintf(
 			"Welcome!\n\nConfirm your email by opening the link below:\n\n%s\n\nIf you did not request this, you can safely ignore this message.\n",
 			link,
@@ -211,7 +227,7 @@ func verificationBody(cfg config.MailConfig, token string) string {
 
 func passwordResetBody(cfg config.MailConfig, token string) string {
 	token = strings.TrimSpace(token)
-	if link := strings.TrimSpace(strings.ReplaceAll(cfg.PasswordResetURLTemplate, "{{token}}", token)); link != "" {
+	if link := renderTokenURLTemplate(cfg.PasswordResetURLTemplate, token); link != "" {
 		return fmt.Sprintf(
 			"We received a request to reset your password.\n\nOpen the link below to continue:\n\n%s\n\nIf this was not you, you can ignore this message.\n",
 			link,

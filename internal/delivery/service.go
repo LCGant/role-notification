@@ -14,6 +14,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -121,7 +122,7 @@ func (s *Service) EnqueueSocial(ctx context.Context, to, subject, body string) e
 
 func (s *Service) enqueue(ctx context.Context, job Job) error {
 	_ = ctx
-	if err := os.MkdirAll(s.queueDir, 0o700); err != nil {
+	if err := ensureSecureDir(s.queueDir); err != nil {
 		return err
 	}
 	payload, err := s.encryptJob(job)
@@ -148,13 +149,13 @@ func (s *Service) Run(ctx context.Context) {
 }
 
 func (s *Service) processPending(ctx context.Context) {
-	if err := os.MkdirAll(s.queueDir, 0o700); err != nil {
+	if err := ensureSecureDir(s.queueDir); err != nil {
 		if s.logger != nil {
 			s.logger.Error("notification queue init failed", "err", err)
 		}
 		return
 	}
-	if err := os.MkdirAll(s.processingDir(), 0o700); err != nil {
+	if err := ensureSecureDir(s.processingDir()); err != nil {
 		if s.logger != nil {
 			s.logger.Error("notification processing queue init failed", "err", err)
 		}
@@ -237,7 +238,7 @@ func (s *Service) requeue(path string, job Job) error {
 
 func (s *Service) deadLetter(path string) error {
 	deadDir := filepath.Join(s.queueDir, "dead-letter")
-	if err := os.MkdirAll(deadDir, 0o700); err != nil {
+	if err := ensureSecureDir(deadDir); err != nil {
 		return err
 	}
 	return os.Rename(path, filepath.Join(deadDir, filepath.Base(path)))
@@ -366,4 +367,24 @@ func min(a, b int) int {
 func hashEmail(value string) string {
 	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(value))))
 	return hex.EncodeToString(sum[:8])
+}
+
+func ensureSecureDir(path string) error {
+	if err := os.MkdirAll(path, 0o700); err != nil {
+		return err
+	}
+	if runtime.GOOS == "windows" {
+		return nil
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("%s is not a directory", path)
+	}
+	if info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("directory %s must have permissions 0700", path)
+	}
+	return nil
 }
