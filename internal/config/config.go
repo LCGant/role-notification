@@ -27,6 +27,7 @@ type Config struct {
 	QueueKeys                  map[string][]byte
 	QueueKeyVersion            string
 	AuthBaseURL                string
+	AuthAllowedHosts           []string
 	AuthServiceTokenMintToken  string
 	SessionCookie              string
 	DeviceCookie               string
@@ -61,6 +62,7 @@ func Load() (Config, error) {
 		Env:                        envconfig.EnvString("NOTIFICATION_ENV", "development"),
 		QueueDir:                   strings.TrimSpace(envconfig.EnvString("NOTIFICATION_QUEUE_DIR", "/tmp/notification-queue")),
 		AuthBaseURL:                strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_BASE_URL", "")),
+		AuthAllowedHosts:           parseAllowedHosts(envconfig.EnvString("NOTIFICATION_AUTH_ALLOWED_HOSTS", "auth,auth.internal,localhost,127.0.0.1,::1")),
 		AuthServiceTokenMintToken:  strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN", "")),
 		SessionCookie:              strings.TrimSpace(envconfig.EnvString("NOTIFICATION_SESSION_COOKIE", "session_id")),
 		DeviceCookie:               strings.TrimSpace(envconfig.EnvString("NOTIFICATION_DEVICE_COOKIE", "device_id")),
@@ -139,7 +141,7 @@ func Load() (Config, error) {
 	if cfg.AuthBaseURL == "" && cfg.AuthServiceTokenMintToken != "" {
 		return Config{}, errors.New("NOTIFICATION_AUTH_BASE_URL is required when NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN is set")
 	}
-	if err := validateRemoteURL(cfg.AuthBaseURL, cfg.AllowInsecureHTTP); err != nil {
+	if err := validateRemoteURL(cfg.AuthBaseURL, cfg.AllowInsecureHTTP, cfg.AuthAllowedHosts); err != nil {
 		return Config{}, fmt.Errorf("invalid NOTIFICATION_AUTH_BASE_URL: %w", err)
 	}
 	if rawKeys := strings.TrimSpace(os.Getenv("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS")); rawKeys != "" {
@@ -160,7 +162,7 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-func validateRemoteURL(raw string, allowInsecure bool) error {
+func validateRemoteURL(raw string, allowInsecure bool, allowedHosts []string) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
@@ -168,6 +170,10 @@ func validateRemoteURL(raw string, allowInsecure bool) error {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return err
+	}
+	host := strings.ToLower(strings.TrimSpace(u.Hostname()))
+	if !hostAllowed(host, allowedHosts) {
+		return fmt.Errorf("host %q is not in the allowed host list", host)
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "https":
@@ -189,6 +195,34 @@ func isLoopbackHost(host string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+func parseAllowedHosts(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		host := strings.ToLower(strings.TrimSpace(part))
+		if host == "" {
+			continue
+		}
+		out = append(out, host)
+	}
+	return out
+}
+
+func hostAllowed(host string, allowedHosts []string) bool {
+	if host == "" {
+		return false
+	}
+	if isLoopbackHost(host) {
+		return true
+	}
+	for _, allowed := range allowedHosts {
+		if strings.EqualFold(strings.TrimSpace(allowed), host) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseQueueKeys(raw string) (map[string][]byte, error) {

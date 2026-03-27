@@ -34,6 +34,36 @@ func TestLoadAcceptsVersionedQueueKeys(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsDisallowedAuthHost(t *testing.T) {
+	t.Setenv("NOTIFICATION_EMAIL_VERIFICATION_INTERNAL_TOKEN", "verify-secret")
+	t.Setenv("NOTIFICATION_PASSWORD_RESET_INTERNAL_TOKEN", "reset-secret")
+	t.Setenv("NOTIFICATION_QUEUE_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("EMAIL_OUTBOX_DIR", t.TempDir())
+	t.Setenv("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS", "auth-internal-default=LzMbiiOlgX5h9yVEmSwNFnJqWJeUXpgSg5VC99OCmPA=")
+	t.Setenv("NOTIFICATION_AUTH_BASE_URL", "https://evil.example.test")
+	t.Setenv("NOTIFICATION_AUTH_ALLOWED_HOSTS", "auth,auth.internal")
+	t.Setenv("NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN", "mint-secret")
+
+	if _, err := Load(); err == nil {
+		t.Fatal("expected disallowed auth host to be rejected")
+	}
+}
+
+func TestLoadAllowsConfiguredAuthHost(t *testing.T) {
+	t.Setenv("NOTIFICATION_EMAIL_VERIFICATION_INTERNAL_TOKEN", "verify-secret")
+	t.Setenv("NOTIFICATION_PASSWORD_RESET_INTERNAL_TOKEN", "reset-secret")
+	t.Setenv("NOTIFICATION_QUEUE_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("EMAIL_OUTBOX_DIR", t.TempDir())
+	t.Setenv("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS", "auth-internal-default=LzMbiiOlgX5h9yVEmSwNFnJqWJeUXpgSg5VC99OCmPA=")
+	t.Setenv("NOTIFICATION_AUTH_BASE_URL", "https://auth.example.test")
+	t.Setenv("NOTIFICATION_AUTH_ALLOWED_HOSTS", "auth,auth.internal,auth.example.test")
+	t.Setenv("NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN", "mint-secret")
+
+	if _, err := Load(); err != nil {
+		t.Fatalf("expected configured auth host to be accepted: %v", err)
+	}
+}
+
 func bytesRepeat(value byte, count int) []byte {
 	out := make([]byte, count)
 	for i := range out {
