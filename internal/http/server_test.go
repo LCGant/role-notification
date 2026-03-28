@@ -27,7 +27,7 @@ import (
 
 func TestInternalVerificationRequiresToken(t *testing.T) {
 	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{1}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
-	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	queue := newTestQueue(cfg)
 	h := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New())
 
 	req := httptest.NewRequest("POST", "/internal/email-verification", bytes.NewBufferString(`{"to":"u@example.com","token":"abc"}`))
@@ -42,7 +42,7 @@ func TestInternalVerificationRequiresToken(t *testing.T) {
 func TestVerificationWritesOutbox(t *testing.T) {
 	dir := t.TempDir()
 	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{2}, 32), Mail: config.MailConfig{OutboxDir: dir}}
-	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	queue := newTestQueue(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go queue.Run(ctx)
@@ -78,7 +78,7 @@ func TestVerificationAuditsQueuedDelivery(t *testing.T) {
 	cfg.AuditBaseURL = auditRequests.URL
 	cfg.AuditTimeout = time.Second
 
-	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	queue := newTestQueue(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go queue.Run(ctx)
@@ -109,7 +109,7 @@ func TestVerificationAuditsQueuedDelivery(t *testing.T) {
 
 func TestInternalVerificationRejectsTrailingJSONData(t *testing.T) {
 	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{3}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
-	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	queue := newTestQueue(cfg)
 	h := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New())
 
 	req := httptest.NewRequest("POST", "/internal/email-verification", bytes.NewBufferString("{\"to\":\"u@example.com\",\"token\":\"abc\"}junk"))
@@ -124,7 +124,7 @@ func TestInternalVerificationRejectsTrailingJSONData(t *testing.T) {
 
 func TestInternalVerificationRateLimitsByRecipientAndCaller(t *testing.T) {
 	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", MetricsToken: "metrics", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{3}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
-	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	queue := newTestQueue(cfg)
 	h := New(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, memory.New())
 
 	for i := 0; i < 5; i++ {
@@ -151,7 +151,7 @@ func TestInternalVerificationRateLimitsByRecipientAndCaller(t *testing.T) {
 func TestSocialNotificationWritesOutbox(t *testing.T) {
 	dir := t.TempDir()
 	cfg, signer := socialTokenConfig(t, bytes.Repeat([]byte{4}, 32), dir)
-	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	queue := newTestQueue(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go queue.Run(ctx)
@@ -172,7 +172,7 @@ func TestSocialNotificationWritesOutbox(t *testing.T) {
 
 func TestSocialNotificationSanitizesHTMLBeforePersisting(t *testing.T) {
 	cfg, signer := socialTokenConfig(t, bytes.Repeat([]byte{9}, 32), t.TempDir())
-	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	queue := newTestQueue(cfg)
 	inbox := memory.New()
 	authSrv := newAuthLookupServer(t, "default", 42, "u@example.com")
 	defer authSrv.Close()
@@ -204,7 +204,7 @@ func TestSocialNotificationSanitizesHTMLBeforePersisting(t *testing.T) {
 
 func TestSocialNotificationRejectsMissingAuthOrTenantMismatch(t *testing.T) {
 	cfg, signer := socialTokenConfig(t, bytes.Repeat([]byte{9}, 32), t.TempDir())
-	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	queue := newTestQueue(cfg)
 	inbox := memory.New()
 	authSrv := newAuthLookupServer(t, "default", 42, "u@example.com")
 	defer authSrv.Close()
@@ -239,7 +239,7 @@ func (s stubAuthn) Required(context.Context, *http.Request) (viewer, error) {
 
 func TestNotificationInboxEndpoints(t *testing.T) {
 	cfg := config.Config{VerificationInternalToken: "verify-secret", PasswordResetInternalToken: "reset-secret", QueueDir: t.TempDir(), QueueKey: bytes.Repeat([]byte{5}, 32), Mail: config.MailConfig{OutboxDir: t.TempDir()}}
-	queue := delivery.New(cfg.QueueDir, cfg.QueueKey, sender.New(cfg.Mail), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	queue := newTestQueue(cfg)
 	inbox := memory.New()
 	authn := stubAuthn{viewer: viewer{UserID: 99, TenantID: "default"}}
 	h := NewWithDependencies(cfg, slog.New(slog.NewTextHandler(io.Discard, nil)), queue, inbox, authn, nil)
@@ -398,6 +398,17 @@ func memoryNotification(publicID string, createdAt time.Time) basestore.Notifica
 
 func newNotificationID() (string, error) {
 	return basestore.NewPublicID()
+}
+
+func newTestQueue(cfg config.Config) *delivery.Service {
+	return delivery.NewWithKeyring(
+		cfg.QueueDir,
+		"v1",
+		map[string][]byte{"v1": cfg.QueueKey},
+		false,
+		sender.New(cfg.Mail),
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+	)
 }
 
 func waitForOutboxToken(t *testing.T, dir, token string) {

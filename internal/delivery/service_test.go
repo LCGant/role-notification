@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/LCGant/role-notification/internal/sender"
 )
 
 type stubSender struct {
@@ -49,7 +51,7 @@ func (s *stubSender) SendSocial(ctx context.Context, to, subject, body string) e
 func TestQueuePayloadIsEncryptedAtRest(t *testing.T) {
 	dir := t.TempDir()
 	key := bytes.Repeat([]byte{7}, 32)
-	svc := New(dir, key, &stubSender{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	svc := newTestQueueService(dir, key, &stubSender{})
 
 	if err := svc.EnqueueVerification(context.Background(), "u@example.com", "super-secret-token"); err != nil {
 		t.Fatalf("enqueue: %v", err)
@@ -72,7 +74,7 @@ func TestProcessPendingContinuesAfterFailedJob(t *testing.T) {
 	dir := t.TempDir()
 	key := bytes.Repeat([]byte{9}, 32)
 	backend := &stubSender{failToken: "bad-token"}
-	svc := New(dir, key, backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	svc := newTestQueueService(dir, key, backend)
 
 	if err := svc.EnqueueVerification(context.Background(), "bad@example.com", "bad-token"); err != nil {
 		t.Fatalf("enqueue bad: %v", err)
@@ -122,8 +124,8 @@ func TestProcessPendingClaimsJobsAtomically(t *testing.T) {
 		started: make(chan struct{}, 2),
 		release: make(chan struct{}),
 	}
-	svcA := New(dir, key, backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	svcB := New(dir, key, backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	svcA := newTestQueueService(dir, key, backend)
+	svcB := newTestQueueService(dir, key, backend)
 
 	if err := svcA.EnqueueVerification(context.Background(), "user@example.com", "job-token"); err != nil {
 		t.Fatalf("enqueue job: %v", err)
@@ -186,7 +188,7 @@ func TestQueueSupportsVersionedKeyRotation(t *testing.T) {
 	dir := t.TempDir()
 	backend := &stubSender{}
 
-	legacy := New(dir, bytes.Repeat([]byte{1}, 32), backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	legacy := newTestQueueService(dir, bytes.Repeat([]byte{1}, 32), backend)
 	if err := legacy.EnqueueVerification(context.Background(), "u@example.com", "legacy-token"); err != nil {
 		t.Fatalf("enqueue legacy: %v", err)
 	}
@@ -195,7 +197,7 @@ func TestQueueSupportsVersionedKeyRotation(t *testing.T) {
 	rotated := NewWithKeyring(dir, "v2", map[string][]byte{
 		"v1": bytes.Repeat([]byte{1}, 32),
 		"v2": bytes.Repeat([]byte{2}, 32),
-	}, true, backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, false, backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err := rotated.EnqueueVerification(context.Background(), "u@example.com", "new-token"); err != nil {
 		t.Fatalf("enqueue new: %v", err)
 	}
@@ -217,4 +219,8 @@ func TestEnsureSecureDirAllowsRelaxedPermsWhenConfigured(t *testing.T) {
 	if err := ensureSecureDir(dir, false); err != nil {
 		t.Fatalf("expected relaxed permission check to pass, got %v", err)
 	}
+}
+
+func newTestQueueService(dir string, key []byte, backend sender.Sender) *Service {
+	return NewWithKeyring(dir, "v1", map[string][]byte{"v1": key}, false, backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
