@@ -195,7 +195,7 @@ func TestQueueSupportsVersionedKeyRotation(t *testing.T) {
 	rotated := NewWithKeyring(dir, "v2", map[string][]byte{
 		"v1": bytes.Repeat([]byte{1}, 32),
 		"v2": bytes.Repeat([]byte{2}, 32),
-	}, backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, true, backend, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err := rotated.EnqueueVerification(context.Background(), "u@example.com", "new-token"); err != nil {
 		t.Fatalf("enqueue new: %v", err)
 	}
@@ -206,5 +206,15 @@ func TestQueueSupportsVersionedKeyRotation(t *testing.T) {
 	defer backend.mu.Unlock()
 	if len(backend.sent) != 2 {
 		t.Fatalf("expected both legacy and rotated jobs to be delivered, got %#v", backend.sent)
+	}
+}
+
+func TestEnsureSecureDirAllowsRelaxedPermsWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Skipf("chmod not supported: %v", err)
+	}
+	if err := ensureSecureDir(dir, false); err != nil {
+		t.Fatalf("expected relaxed permission check to pass, got %v", err)
 	}
 }

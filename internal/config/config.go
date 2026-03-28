@@ -24,6 +24,7 @@ type Config struct {
 	LogLevel                   string
 	Env                        string
 	QueueDir                   string
+	QueueRequireStrictPerms    bool
 	QueueKey                   []byte
 	QueueKeys                  map[string][]byte
 	QueueKeyVersion            string
@@ -67,6 +68,7 @@ func Load() (Config, error) {
 		LogLevel:                   envconfig.EnvString("NOTIFICATION_LOG_LEVEL", "info"),
 		Env:                        envconfig.EnvString("NOTIFICATION_ENV", "development"),
 		QueueDir:                   strings.TrimSpace(envconfig.EnvString("NOTIFICATION_QUEUE_DIR", "/tmp/notification-queue")),
+		QueueRequireStrictPerms:    envconfig.EnvBool("NOTIFICATION_QUEUE_REQUIRE_STRICT_PERMS", strings.EqualFold(strings.TrimSpace(envconfig.EnvString("NOTIFICATION_ENV", "development")), "production")),
 		AuthBaseURL:                strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_BASE_URL", "")),
 		AuthAllowedHosts:           parseAllowedHosts(envconfig.EnvString("NOTIFICATION_AUTH_ALLOWED_HOSTS", "auth,auth.internal,localhost,127.0.0.1,::1")),
 		AuthServiceTokenMintToken:  strings.TrimSpace(envconfig.EnvString("NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN", "")),

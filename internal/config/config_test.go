@@ -64,6 +64,35 @@ func TestLoadAllowsConfiguredAuthHost(t *testing.T) {
 	}
 }
 
+func TestLoadDefaultsQueueStrictPermsByEnv(t *testing.T) {
+	t.Setenv("NOTIFICATION_EMAIL_VERIFICATION_INTERNAL_TOKEN", "verify-secret")
+	t.Setenv("NOTIFICATION_PASSWORD_RESET_INTERNAL_TOKEN", "reset-secret")
+	t.Setenv("NOTIFICATION_QUEUE_ENCRYPTION_KEY", base64.StdEncoding.EncodeToString(make([]byte, 32)))
+	t.Setenv("EMAIL_OUTBOX_DIR", t.TempDir())
+	t.Setenv("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS", "auth-internal-default=LzMbiiOlgX5h9yVEmSwNFnJqWJeUXpgSg5VC99OCmPA=")
+
+	t.Setenv("NOTIFICATION_ENV", "development")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("load development config: %v", err)
+	}
+	if cfg.QueueRequireStrictPerms {
+		t.Fatal("expected development config to relax strict queue perms by default")
+	}
+
+	t.Setenv("NOTIFICATION_ENV", "production")
+	t.Setenv("EMAIL_OUTBOX_DIR", "")
+	t.Setenv("SMTP_HOST", "smtp.example.test")
+	t.Setenv("SMTP_FROM", "noreply@example.test")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("load production config: %v", err)
+	}
+	if !cfg.QueueRequireStrictPerms {
+		t.Fatal("expected production config to require strict queue perms by default")
+	}
+}
+
 func bytesRepeat(value byte, count int) []byte {
 	out := make([]byte, count)
 	for i := range out {

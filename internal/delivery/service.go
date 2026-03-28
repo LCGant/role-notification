@@ -43,12 +43,13 @@ type Job struct {
 }
 
 type Service struct {
-	queueDir         string
-	queueKeys        map[string][]byte
-	activeKeyVersion string
-	legacyKeyVersion string
-	sender           sender.Sender
-	logger           *slog.Logger
+	queueDir           string
+	requireStrictPerms bool
+	queueKeys          map[string][]byte
+	activeKeyVersion   string
+	legacyKeyVersion   string
+	sender             sender.Sender
+	logger             *slog.Logger
 }
 
 type envelope struct {
@@ -58,10 +59,10 @@ type envelope struct {
 }
 
 func New(queueDir string, queueKey []byte, backend sender.Sender, logger *slog.Logger) *Service {
-	return NewWithKeyring(queueDir, "v1", map[string][]byte{"v1": queueKey}, backend, logger)
+	return NewWithKeyring(queueDir, "v1", map[string][]byte{"v1": queueKey}, true, backend, logger)
 }
 
-func NewWithKeyring(queueDir, activeKeyVersion string, queueKeys map[string][]byte, backend sender.Sender, logger *slog.Logger) *Service {
+func NewWithKeyring(queueDir, activeKeyVersion string, queueKeys map[string][]byte, requireStrictPerms bool, backend sender.Sender, logger *slog.Logger) *Service {
 	derivedKeys := map[string][]byte{}
 	for version, rawKey := range queueKeys {
 		version = strings.TrimSpace(version)
@@ -83,12 +84,13 @@ func NewWithKeyring(queueDir, activeKeyVersion string, queueKeys map[string][]by
 		legacyKeyVersion = activeKeyVersion
 	}
 	return &Service{
-		queueDir:         queueDir,
-		queueKeys:        derivedKeys,
-		activeKeyVersion: activeKeyVersion,
-		legacyKeyVersion: legacyKeyVersion,
-		sender:           backend,
-		logger:           logger,
+		queueDir:           queueDir,
+		requireStrictPerms: requireStrictPerms,
+		queueKeys:          derivedKeys,
+		activeKeyVersion:   activeKeyVersion,
+		legacyKeyVersion:   legacyKeyVersion,
+		sender:             backend,
+		logger:             logger,
 	}
 }
 
@@ -122,7 +124,7 @@ func (s *Service) EnqueueSocial(ctx context.Context, to, subject, body string) e
 
 func (s *Service) enqueue(ctx context.Context, job Job) error {
 	_ = ctx
-	if err := ensureSecureDir(s.queueDir); err != nil {
+	if err := ensureSecureDir(s.queueDir, s.requireStrictPerms); err != nil {
 		return err
 	}
 	payload, err := s.encryptJob(job)
@@ -149,13 +151,13 @@ func (s *Service) Run(ctx context.Context) {
 }
 
 func (s *Service) processPending(ctx context.Context) {
-	if err := ensureSecureDir(s.queueDir); err != nil {
+	if err := ensureSecureDir(s.queueDir, s.requireStrictPerms); err != nil {
 		if s.logger != nil {
 			s.logger.Error("notification queue init failed", "err", err)
 		}
 		return
 	}
-	if err := ensureSecureDir(s.processingDir()); err != nil {
+	if err := ensureSecureDir(s.processingDir(), s.requireStrictPerms); err != nil {
 		if s.logger != nil {
 			s.logger.Error("notification processing queue init failed", "err", err)
 		}
@@ -238,7 +240,7 @@ func (s *Service) requeue(path string, job Job) error {
 
 func (s *Service) deadLetter(path string) error {
 	deadDir := filepath.Join(s.queueDir, "dead-letter")
-	if err := ensureSecureDir(deadDir); err != nil {
+	if err := ensureSecureDir(deadDir, s.requireStrictPerms); err != nil {
 		return err
 	}
 	return os.Rename(path, filepath.Join(deadDir, filepath.Base(path)))
@@ -369,7 +371,7 @@ func hashEmail(value string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func ensureSecureDir(path string) error {
+func ensureSecureDir(path string, requireStrictPerms bool) error {
 	if err := os.MkdirAll(path, 0o700); err != nil {
 		return err
 	}
@@ -383,7 +385,7 @@ func ensureSecureDir(path string) error {
 	if !info.IsDir() {
 		return fmt.Errorf("%s is not a directory", path)
 	}
-	if info.Mode().Perm() != 0o700 {
+	if requireStrictPerms && info.Mode().Perm() != 0o700 {
 		return fmt.Errorf("directory %s must have permissions 0700", path)
 	}
 	return nil
