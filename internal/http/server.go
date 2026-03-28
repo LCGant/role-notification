@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	nethttp "net/http"
 	"net/mail"
-	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -438,33 +437,12 @@ func (s *Server) authenticated(next func(nethttp.ResponseWriter, *nethttp.Reques
 }
 
 func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Request, viewer viewer) {
-	limit := 20
-	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed <= 0 || parsed > 100 {
-			httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
-			return
-		}
-		limit = parsed
+	query, err := parseNotificationListQuery(r)
+	if err != nil {
+		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
+		return
 	}
-	offset := 0
-	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
-	if cursor != "" {
-		parsed, err := strconv.Atoi(cursor)
-		if err != nil || parsed < 0 {
-			httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
-			return
-		}
-		offset = parsed
-	} else if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
-		parsed, err := strconv.Atoi(raw)
-		if err != nil || parsed < 0 {
-			httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
-			return
-		}
-		offset = parsed
-	}
-	notifications, total, err := s.inbox.ListNotifications(r.Context(), viewer.TenantID, viewer.UserID, limit, offset)
+	notifications, total, err := s.inbox.ListNotifications(r.Context(), viewer.TenantID, viewer.UserID, query.Limit, query.Offset)
 	if err != nil {
 		s.logger.Error("list notifications failed", "err", err)
 		httpx.WriteError(w, nethttp.StatusBadGateway, "unavailable")
@@ -476,32 +454,7 @@ func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Re
 		httpx.WriteError(w, nethttp.StatusBadGateway, "unavailable")
 		return
 	}
-	hasMore := offset+len(notifications) < total
-	var nextOffset *int
-	nextCursor := ""
-	if hasMore {
-		value := offset + len(notifications)
-		nextOffset = &value
-		nextCursor = strconv.Itoa(value)
-	}
-	httpx.WriteJSON(w, nethttp.StatusOK, notificationListResponse{
-		Notifications: presentNotifications(notifications),
-		Total:         total,
-		UnreadCount:   unreadCount,
-		Limit:         limit,
-		Offset:        offset,
-		Cursor:        cursorValue(offset),
-		HasMore:       hasMore,
-		NextOffset:    nextOffset,
-		NextCursor:    nextCursor,
-	})
-}
-
-func cursorValue(offset int) string {
-	if offset <= 0 {
-		return ""
-	}
-	return strconv.Itoa(offset)
+	httpx.WriteJSON(w, nethttp.StatusOK, newNotificationListResponse(notifications, total, unreadCount, query))
 }
 
 type notificationContextKey string
@@ -572,7 +525,7 @@ func (s *Server) handleUnreadCount(w nethttp.ResponseWriter, r *nethttp.Request,
 		httpx.WriteError(w, nethttp.StatusBadGateway, "unavailable")
 		return
 	}
-	httpx.WriteJSON(w, nethttp.StatusOK, map[string]int{"unread_count": count})
+	httpx.WriteJSON(w, nethttp.StatusOK, newUnreadCountResponse(count))
 }
 
 func (s *Server) handleReadNotification(w nethttp.ResponseWriter, r *nethttp.Request, viewer viewer) {
@@ -592,10 +545,7 @@ func (s *Server) handleReadNotification(w nethttp.ResponseWriter, r *nethttp.Req
 		httpx.WriteError(w, nethttp.StatusBadGateway, "unavailable")
 		return
 	}
-	httpx.WriteJSON(w, nethttp.StatusOK, map[string]any{
-		"notification": presentNotification(notification),
-		"unread_count": unreadCount,
-	})
+	httpx.WriteJSON(w, nethttp.StatusOK, newReadNotificationResponse(notification, unreadCount))
 	s.recordAudit(r.Context(), auditclient.Event{
 		Source:    "notification",
 		EventType: "notification:read",
@@ -603,7 +553,7 @@ func (s *Server) handleReadNotification(w nethttp.ResponseWriter, r *nethttp.Req
 		TenantID:  viewer.TenantID,
 		Success:   true,
 		Metadata:  map[string]any{"notification_id": notification.PublicID},
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: notificationCreatedAt(time.Now()),
 	})
 }
 
@@ -614,10 +564,7 @@ func (s *Server) handleReadAllNotifications(w nethttp.ResponseWriter, r *nethttp
 		httpx.WriteError(w, nethttp.StatusBadGateway, "unavailable")
 		return
 	}
-	httpx.WriteJSON(w, nethttp.StatusOK, map[string]int{
-		"marked_read":  updated,
-		"unread_count": 0,
-	})
+	httpx.WriteJSON(w, nethttp.StatusOK, newReadAllResponse(updated))
 	s.recordAudit(r.Context(), auditclient.Event{
 		Source:    "notification",
 		EventType: "notification:read-all",
@@ -625,30 +572,8 @@ func (s *Server) handleReadAllNotifications(w nethttp.ResponseWriter, r *nethttp
 		TenantID:  viewer.TenantID,
 		Success:   true,
 		Metadata:  map[string]any{"marked_read": updated},
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: notificationCreatedAt(time.Now()),
 	})
-}
-
-func presentNotifications(in []basestore.Notification) []notificationResponse {
-	out := make([]notificationResponse, 0, len(in))
-	for _, notification := range in {
-		out = append(out, presentNotification(notification))
-	}
-	return out
-}
-
-func presentNotification(notification basestore.Notification) notificationResponse {
-	return notificationResponse{
-		ID:        notification.PublicID,
-		Kind:      notification.Kind,
-		KindLabel: kindLabel(notification.Kind),
-		KindGroup: kindGroup(notification.Kind),
-		Subject:   notification.Subject,
-		Body:      notification.Body,
-		CreatedAt: notification.CreatedAt,
-		ReadAt:    notification.ReadAt,
-		IsRead:    notification.ReadAt != nil,
-	}
 }
 
 func kindLabel(kind string) string {
@@ -663,10 +588,6 @@ func kindGroup(kind string) string {
 		return meta.Group
 	}
 	return "system"
-}
-
-func normalizeNotificationKind(kind string) string {
-	return strings.TrimSpace(strings.ToLower(kind))
 }
 
 func (s *Server) recordAudit(ctx context.Context, event auditclient.Event) {
