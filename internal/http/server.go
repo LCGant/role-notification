@@ -2,7 +2,6 @@ package http
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -172,7 +171,7 @@ func (s *Server) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
 	var handler nethttp.Handler = s.mux
 	handler = s.loggingMiddleware(handler)
 	handler = s.recoveryMiddleware(handler)
-	handler = notificationRequestIDMiddleware(handler)
+	handler = httpx.RequestID(handler)
 	handler.ServeHTTP(w, r)
 }
 
@@ -457,34 +456,6 @@ func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Re
 	httpx.WriteJSON(w, nethttp.StatusOK, newNotificationListResponse(notifications, total, unreadCount, query))
 }
 
-type notificationContextKey string
-
-const notificationRequestIDKey notificationContextKey = "requestID"
-
-func notificationRequestIDFromContext(ctx context.Context) string {
-	value, _ := ctx.Value(notificationRequestIDKey).(string)
-	return value
-}
-
-func notificationRequestIDMiddleware(next nethttp.Handler) nethttp.Handler {
-	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
-		requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
-		if requestID == "" {
-			buf := make([]byte, 8)
-			if _, err := rand.Read(buf); err == nil {
-				requestID = hex.EncodeToString(buf)
-			}
-		}
-		if requestID == "" {
-			requestID = "unknown"
-		}
-		r.Header.Set("X-Request-Id", requestID)
-		w.Header().Set("X-Request-Id", requestID)
-		ctx := context.WithValue(r.Context(), notificationRequestIDKey, requestID)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
 func (s *Server) loggingMiddleware(next nethttp.Handler) nethttp.Handler {
 	logger := s.logger
 	if logger == nil {
@@ -492,11 +463,13 @@ func (s *Server) loggingMiddleware(next nethttp.Handler) nethttp.Handler {
 	}
 	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		start := time.Now()
-		next.ServeHTTP(w, r)
+		rec := &httpx.StatusRecorder{ResponseWriter: w}
+		next.ServeHTTP(rec, r)
 		logger.InfoContext(r.Context(), "http_request",
 			"method", r.Method,
 			"path", r.URL.Path,
-			"request_id", notificationRequestIDFromContext(r.Context()),
+			"status", rec.Status(),
+			"request_id", httpx.RequestIDFromContext(r.Context()),
 			"duration_ms", time.Since(start).Milliseconds(),
 		)
 	})
@@ -510,7 +483,7 @@ func (s *Server) recoveryMiddleware(next nethttp.Handler) nethttp.Handler {
 	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
 		defer func() {
 			if rec := recover(); rec != nil {
-				logger.Error("panic_recovered", "error", "internal_error", "request_id", notificationRequestIDFromContext(r.Context()))
+				logger.Error("panic_recovered", "error", "internal_error", "request_id", httpx.RequestIDFromContext(r.Context()))
 				httpx.WriteError(w, nethttp.StatusInternalServerError, "internal_error")
 			}
 		}()
