@@ -282,11 +282,13 @@ func TestNotificationInboxEndpoints(t *testing.T) {
 			IsRead    bool       `json:"is_read"`
 			ReadAt    *time.Time `json:"read_at"`
 		} `json:"notifications"`
-		Total       int  `json:"total"`
-		UnreadCount int  `json:"unread_count"`
-		Limit       int  `json:"limit"`
-		Offset      int  `json:"offset"`
-		HasMore     bool `json:"has_more"`
+		Total       int    `json:"total"`
+		UnreadCount int    `json:"unread_count"`
+		Limit       int    `json:"limit"`
+		Offset      int    `json:"offset"`
+		Cursor      string `json:"cursor"`
+		HasMore     bool   `json:"has_more"`
+		NextCursor  string `json:"next_cursor"`
 	}
 	if err := json.Unmarshal(rr.Body.Bytes(), &listResp); err != nil {
 		t.Fatalf("decode list response: %v body=%s", err, rr.Body.String())
@@ -294,11 +296,53 @@ func TestNotificationInboxEndpoints(t *testing.T) {
 	if listResp.Total != 2 || listResp.UnreadCount != 2 || listResp.Limit != 10 || listResp.Offset != 0 || listResp.HasMore {
 		t.Fatalf("unexpected list metadata: %+v", listResp)
 	}
+	if listResp.Cursor != "" || listResp.NextCursor != "" {
+		t.Fatalf("expected empty cursor metadata on terminal page, got %+v", listResp)
+	}
 	if len(listResp.Notifications) != 2 || listResp.Notifications[0].ID != id2 {
 		t.Fatalf("expected list response to contain notification %s first, got %+v", id2, listResp.Notifications)
 	}
 	if listResp.Notifications[0].KindLabel == "" || listResp.Notifications[0].KindGroup == "" || listResp.Notifications[0].IsRead {
 		t.Fatalf("unexpected notification presentation: %+v", listResp.Notifications[0])
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/?limit=1&offset=0", nil)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 paginated list, got %d", rr.Code)
+	}
+	var pagedResp struct {
+		Notifications []struct {
+			ID string `json:"id"`
+		} `json:"notifications"`
+		NextCursor string `json:"next_cursor"`
+		HasMore    bool   `json:"has_more"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &pagedResp); err != nil {
+		t.Fatalf("decode paged response: %v body=%s", err, rr.Body.String())
+	}
+	if !pagedResp.HasMore || pagedResp.NextCursor != "1" || len(pagedResp.Notifications) != 1 {
+		t.Fatalf("unexpected paged response: %+v", pagedResp)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/?limit=1&cursor=1", nil)
+	rr = httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200 cursor list, got %d", rr.Code)
+	}
+	var cursorResp struct {
+		Notifications []struct {
+			ID string `json:"id"`
+		} `json:"notifications"`
+		Cursor string `json:"cursor"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &cursorResp); err != nil {
+		t.Fatalf("decode cursor response: %v body=%s", err, rr.Body.String())
+	}
+	if cursorResp.Cursor != "1" || len(cursorResp.Notifications) != 1 || cursorResp.Notifications[0].ID != id1 {
+		t.Fatalf("unexpected cursor response: %+v", cursorResp)
 	}
 
 	req = httptest.NewRequest(http.MethodPost, "/"+id2+"/read", nil)

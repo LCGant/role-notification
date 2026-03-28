@@ -181,7 +181,73 @@ func Load() (Config, error) {
 			return Config{}, errors.New("NOTIFICATION_SERVICE_TOKEN_ISSUER and NOTIFICATION_SERVICE_TOKEN_AUDIENCE are required when NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS is set")
 		}
 	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+func (cfg Config) Validate() error {
+	if strings.TrimSpace(cfg.HTTPAddr) == "" {
+		return errors.New("NOTIFICATION_HTTP_ADDR is required")
+	}
+	if strings.TrimSpace(cfg.VerificationInternalToken) == "" {
+		return errors.New("NOTIFICATION_EMAIL_VERIFICATION_INTERNAL_TOKEN is required")
+	}
+	if strings.TrimSpace(cfg.PasswordResetInternalToken) == "" {
+		return errors.New("NOTIFICATION_PASSWORD_RESET_INTERNAL_TOKEN is required")
+	}
+	if strings.TrimSpace(cfg.QueueDir) == "" {
+		return errors.New("NOTIFICATION_QUEUE_DIR is required")
+	}
+	if len(cfg.QueueKey) != 32 || len(cfg.QueueKeys) == 0 || strings.TrimSpace(cfg.QueueKeyVersion) == "" {
+		return errors.New("notification queue encryption keys are not configured correctly")
+	}
+	if cfg.Mail.OutboxDir != "" && cfg.Mail.SMTPHost != "" {
+		return errors.New("EMAIL_OUTBOX_DIR and SMTP_HOST are mutually exclusive")
+	}
+	if cfg.Mail.OutboxDir == "" && cfg.Mail.SMTPHost == "" {
+		return errors.New("configure EMAIL_OUTBOX_DIR or SMTP_HOST for notification delivery")
+	}
+	if cfg.Mail.SMTPHost != "" {
+		if cfg.Mail.SMTPPort <= 0 || cfg.Mail.SMTPPort > 65535 {
+			return errors.New("SMTP_PORT must be between 1 and 65535")
+		}
+		if cfg.Mail.SMTPFrom == "" {
+			return errors.New("SMTP_FROM is required when SMTP_HOST is set")
+		}
+		if (cfg.Mail.SMTPUsername == "") != (cfg.Mail.SMTPPassword == "") {
+			return errors.New("SMTP_USERNAME and SMTP_PASSWORD must be set together")
+		}
+	}
+	if strings.EqualFold(strings.TrimSpace(cfg.Env), "production") && cfg.Mail.OutboxDir != "" {
+		return errors.New("EMAIL_OUTBOX_DIR is not allowed in production")
+	}
+	if cfg.AuthBaseURL != "" && cfg.AuthServiceTokenMintToken == "" {
+		return errors.New("NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN is required when NOTIFICATION_AUTH_BASE_URL is set")
+	}
+	if cfg.AuthBaseURL == "" && cfg.AuthServiceTokenMintToken != "" {
+		return errors.New("NOTIFICATION_AUTH_BASE_URL is required when NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN is set")
+	}
+	if err := validateRemoteURL(cfg.AuthBaseURL, cfg.AllowInsecureHTTP, cfg.AuthAllowedHosts); err != nil {
+		return fmt.Errorf("invalid NOTIFICATION_AUTH_BASE_URL: %w", err)
+	}
+	if cfg.AuditBaseURL != "" && (cfg.AuthBaseURL == "" || cfg.AuthServiceTokenMintToken == "") {
+		return errors.New("NOTIFICATION_AUDIT_BASE_URL requires NOTIFICATION_AUTH_BASE_URL and NOTIFICATION_AUTH_SERVICE_TOKEN_MINT_TOKEN")
+	}
+	if cfg.AuditBaseURL == "" && cfg.AuditSpoolDir != "" {
+		return errors.New("NOTIFICATION_AUDIT_SPOOL_DIR requires NOTIFICATION_AUDIT_BASE_URL")
+	}
+	if err := validateRemoteURL(cfg.AuditBaseURL, cfg.AuditAllowInsecureHTTP, cfg.AuditAllowedHosts); err != nil {
+		return fmt.Errorf("invalid NOTIFICATION_AUDIT_BASE_URL: %w", err)
+	}
+	if len(cfg.ServiceTokenPublicKeys) == 0 {
+		return errors.New("NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS is required")
+	}
+	if cfg.ServiceTokenIssuer == "" || cfg.ServiceTokenAudience == "" {
+		return errors.New("NOTIFICATION_SERVICE_TOKEN_ISSUER and NOTIFICATION_SERVICE_TOKEN_AUDIENCE are required when NOTIFICATION_SERVICE_TOKEN_PUBLIC_KEYS is set")
+	}
+	return nil
 }
 
 func validateRemoteURL(raw string, allowInsecure bool, allowedHosts []string) error {

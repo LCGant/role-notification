@@ -2,6 +2,7 @@ package http
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -72,8 +73,10 @@ type notificationListResponse struct {
 	UnreadCount   int                    `json:"unread_count"`
 	Limit         int                    `json:"limit"`
 	Offset        int                    `json:"offset"`
+	Cursor        string                 `json:"cursor,omitempty"`
 	HasMore       bool                   `json:"has_more"`
 	NextOffset    *int                   `json:"next_offset,omitempty"`
+	NextCursor    string                 `json:"next_cursor,omitempty"`
 }
 
 type internalSocialClaims struct {
@@ -83,6 +86,22 @@ type internalSocialClaims struct {
 }
 
 type internalSocialClaimsKey struct{}
+
+type socialKindMeta struct {
+	Label string
+	Group string
+}
+
+var socialKinds = map[string]socialKindMeta{
+	"follow":                {Label: "New follower", Group: "social_graph"},
+	"friend_request":        {Label: "Friend request", Group: "social_graph"},
+	"friend_accept":         {Label: "Friend request accepted", Group: "social_graph"},
+	"post_comment":          {Label: "New comment", Group: "content"},
+	"post_share":            {Label: "Post shared", Group: "content"},
+	"playlist_share":        {Label: "Playlist shared", Group: "content"},
+	"playlist_collaborator": {Label: "Playlist collaborator access", Group: "content"},
+	"event_invite":          {Label: "Event invitation", Group: "events"},
+}
 
 func New(cfg config.Config, logger *slog.Logger, svc *delivery.Service, inbox basestore.InboxStore) nethttp.Handler {
 	authn, err := newAuthenticator(cfg)
@@ -136,6 +155,10 @@ func (s *Server) routes() {
 		w.Header().Set("Cache-Control", "no-store")
 		httpx.WriteJSON(w, nethttp.StatusOK, map[string]string{"status": "ok"})
 	})
+	s.mux.HandleFunc("GET /readyz", func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		httpx.WriteJSON(w, nethttp.StatusOK, map[string]string{"status": "ok"})
+	})
 	s.mux.Handle("/metrics", s.metricsGuard(expvar.Handler()))
 	s.mux.Handle("POST /internal/email-verification", s.internalWithToken(s.cfg.VerificationInternalToken, s.handleVerification))
 	s.mux.Handle("POST /internal/password-reset", s.internalWithToken(s.cfg.PasswordResetInternalToken, s.handlePasswordReset))
@@ -147,7 +170,11 @@ func (s *Server) routes() {
 }
 
 func (s *Server) ServeHTTP(w nethttp.ResponseWriter, r *nethttp.Request) {
-	s.mux.ServeHTTP(w, r)
+	var handler nethttp.Handler = s.mux
+	handler = s.loggingMiddleware(handler)
+	handler = s.recoveryMiddleware(handler)
+	handler = notificationRequestIDMiddleware(handler)
+	handler.ServeHTTP(w, r)
 }
 
 func (s *Server) internalWithToken(token string, next nethttp.HandlerFunc) nethttp.Handler {
@@ -217,42 +244,14 @@ func (s *Server) verifySocialBearerToken(w nethttp.ResponseWriter, r *nethttp.Re
 }
 
 func (s *Server) handleVerification(w nethttp.ResponseWriter, r *nethttp.Request) {
-	var req deliveryRequest
-	if err := httpx.DecodeJSON(r, &req); err != nil {
-		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
-		return
-	}
-	req.To = strings.TrimSpace(req.To)
-	req.Token = strings.TrimSpace(req.Token)
-	if req.To == "" || req.Token == "" {
-		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
-		return
-	}
-	normalizedTo, err := normalizeEmailAddress(req.To)
-	if err != nil {
-		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
-		return
-	}
-	if s.mailLimiter != nil && !s.mailLimiter.Allow(internalMailRateLimitKey("verify", normalizedTo, strings.TrimSpace(r.Header.Get("X-Internal-Token")))) {
-		httpx.WriteError(w, nethttp.StatusTooManyRequests, "rate_limit_exceeded")
-		return
-	}
-	if err := s.deliverer.EnqueueVerification(r.Context(), normalizedTo, req.Token); err != nil {
-		s.logger.Error("enqueue verification failed", "err", err)
-		httpx.WriteError(w, nethttp.StatusBadGateway, "delivery_failed")
-		return
-	}
-	s.recordAudit(r.Context(), auditclient.Event{
-		Source:    "notification",
-		EventType: "notification:verify:sent",
-		Success:   true,
-		Metadata:  map[string]any{"email_hash": hashEmail(normalizedTo), "delivery": "queued"},
-		CreatedAt: time.Now().UTC(),
-	})
-	httpx.WriteJSON(w, nethttp.StatusAccepted, map[string]string{"status": "queued"})
+	s.handleEmailDelivery(w, r, "verify", "notification:verify:sent", s.deliverer.EnqueueVerification)
 }
 
 func (s *Server) handlePasswordReset(w nethttp.ResponseWriter, r *nethttp.Request) {
+	s.handleEmailDelivery(w, r, "reset", "notification:reset:sent", s.deliverer.EnqueuePasswordReset)
+}
+
+func (s *Server) handleEmailDelivery(w nethttp.ResponseWriter, r *nethttp.Request, rateLimitKind, auditEventType string, enqueue func(context.Context, string, string) error) {
 	var req deliveryRequest
 	if err := httpx.DecodeJSON(r, &req); err != nil {
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
@@ -269,18 +268,18 @@ func (s *Server) handlePasswordReset(w nethttp.ResponseWriter, r *nethttp.Reques
 		httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
 		return
 	}
-	if s.mailLimiter != nil && !s.mailLimiter.Allow(internalMailRateLimitKey("reset", normalizedTo, strings.TrimSpace(r.Header.Get("X-Internal-Token")))) {
+	if s.mailLimiter != nil && !s.mailLimiter.Allow(internalMailRateLimitKey(rateLimitKind, normalizedTo, strings.TrimSpace(r.Header.Get("X-Internal-Token")))) {
 		httpx.WriteError(w, nethttp.StatusTooManyRequests, "rate_limit_exceeded")
 		return
 	}
-	if err := s.deliverer.EnqueuePasswordReset(r.Context(), normalizedTo, req.Token); err != nil {
-		s.logger.Error("enqueue password reset failed", "err", err)
+	if err := enqueue(r.Context(), normalizedTo, req.Token); err != nil {
+		s.logger.Error("enqueue internal email delivery failed", "kind", rateLimitKind, "err", err)
 		httpx.WriteError(w, nethttp.StatusBadGateway, "delivery_failed")
 		return
 	}
 	s.recordAudit(r.Context(), auditclient.Event{
 		Source:    "notification",
-		EventType: "notification:reset:sent",
+		EventType: auditEventType,
 		Success:   true,
 		Metadata:  map[string]any{"email_hash": hashEmail(normalizedTo), "delivery": "queued"},
 		CreatedAt: time.Now().UTC(),
@@ -415,12 +414,8 @@ func sanitizeNotificationText(value string) string {
 }
 
 func isAllowedSocialKind(value string) bool {
-	switch value {
-	case "follow", "friend_request", "friend_accept", "post_comment", "post_share", "event_invite", "playlist_share", "playlist_collaborator":
-		return true
-	default:
-		return false
-	}
+	_, ok := socialKinds[normalizeNotificationKind(value)]
+	return ok
 }
 
 func (s *Server) authenticated(next func(nethttp.ResponseWriter, *nethttp.Request, viewer)) nethttp.Handler {
@@ -453,7 +448,15 @@ func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Re
 		limit = parsed
 	}
 	offset := 0
-	if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
+	cursor := strings.TrimSpace(r.URL.Query().Get("cursor"))
+	if cursor != "" {
+		parsed, err := strconv.Atoi(cursor)
+		if err != nil || parsed < 0 {
+			httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
+			return
+		}
+		offset = parsed
+	} else if raw := strings.TrimSpace(r.URL.Query().Get("offset")); raw != "" {
 		parsed, err := strconv.Atoi(raw)
 		if err != nil || parsed < 0 {
 			httpx.WriteError(w, nethttp.StatusBadRequest, "bad_request")
@@ -475,9 +478,11 @@ func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Re
 	}
 	hasMore := offset+len(notifications) < total
 	var nextOffset *int
+	nextCursor := ""
 	if hasMore {
 		value := offset + len(notifications)
 		nextOffset = &value
+		nextCursor = strconv.Itoa(value)
 	}
 	httpx.WriteJSON(w, nethttp.StatusOK, notificationListResponse{
 		Notifications: presentNotifications(notifications),
@@ -485,8 +490,78 @@ func (s *Server) handleListNotifications(w nethttp.ResponseWriter, r *nethttp.Re
 		UnreadCount:   unreadCount,
 		Limit:         limit,
 		Offset:        offset,
+		Cursor:        cursorValue(offset),
 		HasMore:       hasMore,
 		NextOffset:    nextOffset,
+		NextCursor:    nextCursor,
+	})
+}
+
+func cursorValue(offset int) string {
+	if offset <= 0 {
+		return ""
+	}
+	return strconv.Itoa(offset)
+}
+
+type notificationContextKey string
+
+const notificationRequestIDKey notificationContextKey = "requestID"
+
+func notificationRequestIDFromContext(ctx context.Context) string {
+	value, _ := ctx.Value(notificationRequestIDKey).(string)
+	return value
+}
+
+func notificationRequestIDMiddleware(next nethttp.Handler) nethttp.Handler {
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		requestID := strings.TrimSpace(r.Header.Get("X-Request-Id"))
+		if requestID == "" {
+			buf := make([]byte, 8)
+			if _, err := rand.Read(buf); err == nil {
+				requestID = hex.EncodeToString(buf)
+			}
+		}
+		if requestID == "" {
+			requestID = "unknown"
+		}
+		r.Header.Set("X-Request-Id", requestID)
+		w.Header().Set("X-Request-Id", requestID)
+		ctx := context.WithValue(r.Context(), notificationRequestIDKey, requestID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *Server) loggingMiddleware(next nethttp.Handler) nethttp.Handler {
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
+		logger.InfoContext(r.Context(), "http_request",
+			"method", r.Method,
+			"path", r.URL.Path,
+			"request_id", notificationRequestIDFromContext(r.Context()),
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
+	})
+}
+
+func (s *Server) recoveryMiddleware(next nethttp.Handler) nethttp.Handler {
+	logger := s.logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return nethttp.HandlerFunc(func(w nethttp.ResponseWriter, r *nethttp.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				logger.Error("panic_recovered", "error", "internal_error", "request_id", notificationRequestIDFromContext(r.Context()))
+				httpx.WriteError(w, nethttp.StatusInternalServerError, "internal_error")
+			}
+		}()
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -577,39 +652,21 @@ func presentNotification(notification basestore.Notification) notificationRespon
 }
 
 func kindLabel(kind string) string {
-	switch strings.TrimSpace(strings.ToLower(kind)) {
-	case "follow":
-		return "New follower"
-	case "friend_request":
-		return "Friend request"
-	case "friend_accept":
-		return "Friend request accepted"
-	case "post_comment":
-		return "New comment"
-	case "post_share":
-		return "Post shared"
-	case "playlist_share":
-		return "Playlist shared"
-	case "playlist_collaborator":
-		return "Playlist collaborator access"
-	case "event_invite":
-		return "Event invitation"
-	default:
-		return "Notification"
+	if meta, ok := socialKinds[normalizeNotificationKind(kind)]; ok {
+		return meta.Label
 	}
+	return "Notification"
 }
 
 func kindGroup(kind string) string {
-	switch strings.TrimSpace(strings.ToLower(kind)) {
-	case "follow", "friend_request", "friend_accept":
-		return "social_graph"
-	case "post_comment", "post_share", "playlist_share", "playlist_collaborator":
-		return "content"
-	case "event_invite":
-		return "events"
-	default:
-		return "system"
+	if meta, ok := socialKinds[normalizeNotificationKind(kind)]; ok {
+		return meta.Group
 	}
+	return "system"
+}
+
+func normalizeNotificationKind(kind string) string {
+	return strings.TrimSpace(strings.ToLower(kind))
 }
 
 func (s *Server) recordAudit(ctx context.Context, event auditclient.Event) {

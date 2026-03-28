@@ -27,6 +27,10 @@ func main() {
 		slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})).Error("config load failed", "err", err)
 		os.Exit(1)
 	}
+	if err := cfg.Validate(); err != nil {
+		slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})).Error("config validation failed", "err", err)
+		os.Exit(1)
+	}
 
 	level := slog.LevelInfo
 	switch cfg.LogLevel {
