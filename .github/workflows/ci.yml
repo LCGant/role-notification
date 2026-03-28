@@ -18,6 +18,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: LCGant/role-root
+          ref: main
           path: role-root
       - name: Setup Go
         uses: actions/setup-go@v5
@@ -29,8 +30,10 @@ jobs:
           go mod edit -replace github.com/LCGant/role-config="$GITHUB_WORKSPACE/role-root/libs/config"
           go mod edit -replace github.com/LCGant/role-crypto="$GITHUB_WORKSPACE/role-root/libs/crypto"
           go mod edit -replace github.com/LCGant/role-errors="$GITHUB_WORKSPACE/role-root/libs/errors"
+          go mod edit -replace github.com/LCGant/role-httpclient="$GITHUB_WORKSPACE/role-root/libs/httpclient"
           go mod edit -replace github.com/LCGant/role-httpx="$GITHUB_WORKSPACE/role-root/libs/httpx"
           go mod edit -replace github.com/LCGant/role-internaltoken="$GITHUB_WORKSPACE/role-root/libs/internaltoken"
+          go mod edit -replace github.com/LCGant/role-ratelimit="$GITHUB_WORKSPACE/role-root/libs/ratelimit"
       - name: Download deps
         run: go mod download
       - name: Verify formatting
