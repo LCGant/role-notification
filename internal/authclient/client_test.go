@@ -56,7 +56,7 @@ func newAuthServer(t *testing.T, signer *internaltoken.Signer) *httptest.Server 
 			if r.Header.Get("X-Internal-Token") != "notification-mint-secret" {
 				t.Fatalf("unexpected mint token: %q", r.Header.Get("X-Internal-Token"))
 			}
-			var req serviceTokenMintRequest
+			var req internaltoken.MintRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode mint request: %v", err)
 			}
@@ -64,10 +64,10 @@ func newAuthServer(t *testing.T, signer *internaltoken.Signer) *httptest.Server 
 			if err != nil {
 				t.Fatalf("mint token: %v", err)
 			}
-			_ = json.NewEncoder(w).Encode(serviceTokenMintResponse{
-				Token: &serviceTokenPayload{
-					Value:     token,
-					ExpiresAt: claims.ExpiresAt.UTC().Format(time.RFC3339),
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"token": map[string]any{
+					"value":      token,
+					"expires_at": claims.ExpiresAt.UTC().Format(time.RFC3339),
 				},
 			})
 		case r.Method == http.MethodGet && r.URL.Path == "/internal/users/42":
