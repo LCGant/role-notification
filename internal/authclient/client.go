@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -24,8 +23,6 @@ type Client struct {
 	baseURL    string
 	mintToken  string
 	httpClient *http.Client
-	mu         sync.Mutex
-	tokenCache map[string]cachedToken
 }
 
 type User struct {
@@ -66,11 +63,6 @@ type serviceTokenPayload struct {
 	ExpiresAt string `json:"expires_at"`
 }
 
-type cachedToken struct {
-	value     string
-	expiresAt time.Time
-}
-
 func New(baseURL, mintToken string) *Client {
 	if strings.TrimSpace(baseURL) == "" || strings.TrimSpace(mintToken) == "" {
 		return nil
@@ -79,7 +71,6 @@ func New(baseURL, mintToken string) *Client {
 		baseURL:    strings.TrimRight(baseURL, "/"),
 		mintToken:  strings.TrimSpace(mintToken),
 		httpClient: &http.Client{Timeout: 5 * time.Second},
-		tokenCache: map[string]cachedToken{},
 	}
 }
 

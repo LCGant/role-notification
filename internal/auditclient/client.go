@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	httpclient "github.com/LCGant/role-httpclient"
@@ -20,7 +19,6 @@ type Client struct {
 	authBaseURL string
 	mintToken   string
 	httpClient  *http.Client
-	mu          sync.Mutex
 }
 
 type Event struct {
